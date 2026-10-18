@@ -13,7 +13,13 @@
 #![deny(clippy::todo)]
 
 pub mod bridge;
+pub mod command;
 pub mod creds;
 pub mod error;
 pub mod import;
 pub mod llm;
+pub mod plex;
+
+pub use command::{dispatch, dispatch_auto, Command};
+pub use error::DeviceError;
+pub use plex::{PlexClient, PlexConfig, Vendor};
