@@ -1,0 +1,17 @@
+[package]
+name = "plex-core"
+version = "0.1.0"
+edition = "2021"
+description = "L1 Plex Media Server protocol, state machine, command bus (no UI/MCP deps)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true
