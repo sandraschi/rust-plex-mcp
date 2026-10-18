@@ -5,9 +5,12 @@
 //! - Zero `ctx.set_visuals()` or `ctx.set_zoom_factor()` inside `ctx.input(|i| ...)`.
 //! - Strict glyph allowlist (`°`, `×`, `·`, `…`) verified at compile/test time by `glyph_source_scan`.
 
-use eframe::egui::{self, Color32, CornerRadius, Margin, Pos2, RichText, Stroke, Vec2};
-use plex_core::{dispatch, dispatch_auto, Command, PlexConfig, Vendor};
+use eframe::egui::{
+    self, Color32, CornerRadius, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, Vec2,
+};
+use plex_core::{dispatch, dispatch_auto, fetch_image_bytes, Command, PlexConfig, Vendor};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -143,6 +146,10 @@ enum Job {
         llm_api_key: String,
     },
     CrossconnectReply(Value),
+    PosterLoaded {
+        path: String,
+        bytes: Option<Vec<u8>>,
+    },
 }
 
 pub struct PlexApp {
@@ -179,6 +186,12 @@ pub struct PlexApp {
     tools_val: Value,
     skills_val: Value,
     last_raw: Value,
+
+    // Poster textures & async cache
+    poster_cache: HashMap<String, Option<egui::TextureHandle>>,
+    fetching_posters: HashSet<String>,
+    movies_view_grid: bool,
+    movies_filter: String,
 
     // Search and filter inputs
     search_query: String,
@@ -336,6 +349,211 @@ fn paint_theme_button(ui: &mut egui::Ui, theme: Theme) -> egui::Response {
     resp.on_hover_text("Toggle Dark / Light theme")
 }
 
+/// Render a movie poster image or a styled film vector placeholder card.
+fn render_poster_image(
+    ui: &mut egui::Ui,
+    tex: Option<&egui::TextureHandle>,
+    size: Vec2,
+    fallback_title: &str,
+) {
+    if let Some(t) = tex {
+        ui.add(
+            egui::Image::new(t)
+                .fit_to_exact_size(size)
+                .corner_radius(CornerRadius::same(6)),
+        );
+    } else {
+        let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 25, 38));
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            Stroke::new(1.0, BORDER_DARK),
+            StrokeKind::Inside,
+        );
+
+        let c = rect.center();
+        let icon_rect = Rect::from_center_size(Pos2::new(c.x, c.y - 12.0), Vec2::new(32.0, 24.0));
+        p.rect_filled(
+            icon_rect,
+            CornerRadius::same(3),
+            Color32::from_rgb(33, 46, 68),
+        );
+        p.rect_stroke(
+            icon_rect,
+            CornerRadius::same(3),
+            Stroke::new(1.0, AMBER),
+            StrokeKind::Inside,
+        );
+        p.line_segment(
+            [
+                Pos2::new(icon_rect.min.x + 8.0, icon_rect.min.y),
+                Pos2::new(icon_rect.min.x + 14.0, icon_rect.min.y + 8.0),
+            ],
+            Stroke::new(1.5, AMBER),
+        );
+        p.line_segment(
+            [
+                Pos2::new(icon_rect.min.x + 18.0, icon_rect.min.y),
+                Pos2::new(icon_rect.min.x + 24.0, icon_rect.min.y + 8.0),
+            ],
+            Stroke::new(1.5, AMBER),
+        );
+
+        let short = if fallback_title.len() > 14 {
+            &fallback_title[..14]
+        } else {
+            fallback_title
+        };
+        p.text(
+            Pos2::new(c.x, c.y + 16.0),
+            egui::Align2::CENTER_CENTER,
+            short,
+            egui::FontId::proportional(10.5),
+            SLATE_FAINT,
+        );
+    }
+}
+
+/// Render a 2:3 aspect ratio Movie Poster Card matching the original webapp.
+fn movie_card(
+    ui: &mut egui::Ui,
+    tex: Option<&egui::TextureHandle>,
+    title: &str,
+    year: Option<&str>,
+    selected: bool,
+    card_width: f32,
+) -> bool {
+    let card_height = (card_width * 1.5).round();
+    let is_dark = ui.visuals().dark_mode;
+    let bg = if selected {
+        AMBER_GLOW
+    } else if is_dark {
+        CARD_DARK
+    } else {
+        Color32::WHITE
+    };
+    let border = if selected {
+        AMBER
+    } else if is_dark {
+        BORDER_DARK
+    } else {
+        Color32::from_rgb(203, 213, 225)
+    };
+
+    let frame = egui::Frame::NONE
+        .fill(bg)
+        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, border))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(6));
+
+    let mut clicked = false;
+    frame.show(ui, |ui| {
+        ui.set_width(card_width);
+        let resp = ui.allocate_response(Vec2::new(card_width, card_height), egui::Sense::click());
+        if resp.clicked() {
+            clicked = true;
+        }
+
+        if let Some(t) = tex {
+            let painter = ui.painter_at(resp.rect);
+            painter.image(
+                t.id(),
+                resp.rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            let p = ui.painter_at(resp.rect);
+            p.rect_filled(
+                resp.rect,
+                CornerRadius::same(6),
+                Color32::from_rgb(18, 25, 38),
+            );
+            p.rect_stroke(
+                resp.rect,
+                CornerRadius::same(6),
+                Stroke::new(1.0, BORDER_DARK),
+                StrokeKind::Inside,
+            );
+
+            let c = resp.rect.center();
+            let icon_rect =
+                Rect::from_center_size(Pos2::new(c.x, c.y - 12.0), Vec2::new(32.0, 24.0));
+            p.rect_filled(
+                icon_rect,
+                CornerRadius::same(3),
+                Color32::from_rgb(33, 46, 68),
+            );
+            p.rect_stroke(
+                icon_rect,
+                CornerRadius::same(3),
+                Stroke::new(1.0, AMBER),
+                StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(icon_rect.min.x + 8.0, icon_rect.min.y),
+                    Pos2::new(icon_rect.min.x + 14.0, icon_rect.min.y + 8.0),
+                ],
+                Stroke::new(1.5, AMBER),
+            );
+            p.line_segment(
+                [
+                    Pos2::new(icon_rect.min.x + 18.0, icon_rect.min.y),
+                    Pos2::new(icon_rect.min.x + 24.0, icon_rect.min.y + 8.0),
+                ],
+                Stroke::new(1.5, AMBER),
+            );
+
+            let short = if title.len() > 14 {
+                &title[..14]
+            } else {
+                title
+            };
+            p.text(
+                Pos2::new(c.x, c.y + 16.0),
+                egui::Align2::CENTER_CENTER,
+                short,
+                egui::FontId::proportional(10.0),
+                SLATE_FAINT,
+            );
+        }
+
+        if resp.hovered() {
+            let p = ui.painter_at(resp.rect);
+            p.rect_stroke(
+                resp.rect,
+                CornerRadius::same(6),
+                Stroke::new(1.5, AMBER),
+                StrokeKind::Inside,
+            );
+        }
+
+        ui.add_space(4.0);
+        let title_resp = ui.add(
+            egui::Label::new(
+                RichText::new(title)
+                    .size(12.0)
+                    .strong()
+                    .color(Color32::WHITE),
+            )
+            .truncate(),
+        );
+        if title_resp.clicked() {
+            clicked = true;
+        }
+        if let Some(y) = year {
+            if !y.is_empty() {
+                ui.label(RichText::new(y).size(10.5).color(SLATE_MUTED));
+            }
+        }
+    });
+
+    clicked
+}
+
 impl PlexApp {
     pub fn new(cc: &eframe::CreationContext<'_>, runtime: Arc<tokio::runtime::Runtime>) -> Self {
         cc.egui_ctx.set_visuals(harsh_visuals());
@@ -373,6 +591,11 @@ impl PlexApp {
             tools_val: Value::Null,
             skills_val: Value::Null,
             last_raw: Value::Null,
+
+            poster_cache: HashMap::new(),
+            fetching_posters: HashSet::new(),
+            movies_view_grid: true,
+            movies_filter: String::new(),
 
             search_query: String::new(),
             semantic_query: String::new(),
@@ -460,6 +683,24 @@ impl PlexApp {
         }
     }
 
+    fn prefetch_posters(&mut self, paths: &[String]) {
+        for p in paths {
+            if !p.is_empty()
+                && !self.poster_cache.contains_key(p)
+                && !self.fetching_posters.contains(p)
+            {
+                self.fetching_posters.insert(p.clone());
+                let tx = self.tx.clone();
+                let config = self.get_plex_config();
+                let path = p.clone();
+                self.spawn(async move {
+                    let bytes = fetch_image_bytes(&config, &path).await.ok();
+                    let _ = tx.send(Job::PosterLoaded { path, bytes });
+                });
+            }
+        }
+    }
+
     fn refresh_all(&mut self) {
         let tx = self.tx.clone();
         let config = self.get_plex_config();
@@ -471,7 +712,7 @@ impl PlexApp {
                 let _ = tx.send(Job::Libraries(v));
             }
             if let Ok(v) =
-                dispatch(&config, Command::LibraryRecentlyAdded { limit: Some(10) }).await
+                dispatch(&config, Command::LibraryRecentlyAdded { limit: Some(12) }).await
             {
                 let _ = tx.send(Job::RecentlyAdded(v));
             }
@@ -658,6 +899,21 @@ impl PlexApp {
                     self.status_line = "Crossconnect dispatched successfully".to_string();
                     self.log_event("[INFO] Crossconnect bridge request dispatched");
                 }
+                Job::PosterLoaded { path, bytes } => {
+                    self.fetching_posters.remove(&path);
+                    let tex = bytes.and_then(|b| {
+                        let decoded = image::load_from_memory(&b).ok()?.to_rgba8();
+                        let size = [decoded.width() as usize, decoded.height() as usize];
+                        let color_img =
+                            egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+                        Some(ctx.load_texture(
+                            format!("poster-{}", path),
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        ))
+                    });
+                    self.poster_cache.insert(path, tex);
+                }
             }
         }
         if had_jobs {
@@ -667,7 +923,6 @@ impl PlexApp {
 
     // UI Navigation & Views
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
-        // Header: Logo + App title + Collapse toggle
         ui.horizontal(|ui| {
             let (rect, _resp) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, CornerRadius::same(4), AMBER);
@@ -700,7 +955,6 @@ impl PlexApp {
 
         ui.add_space(8.0);
 
-        // Connection pill
         if self.sidebar_open {
             ui.horizontal(|ui| {
                 let dot_color = if self.plex_ok { EMERALD } else { AMBER };
@@ -719,7 +973,6 @@ impl PlexApp {
         ui.separator();
         ui.add_space(4.0);
 
-        // Nav item list
         egui::ScrollArea::vertical().show(ui, |ui| {
             let nav_items = [
                 Page::Overview,
@@ -800,7 +1053,6 @@ impl PlexApp {
             ui.separator();
             ui.add_space(4.0);
 
-            // Crossconnect & Raw JSON shortcuts
             let active_cc = self.page == Page::Crossconnect;
             let active_raw = self.page == Page::RawJson;
 
@@ -857,7 +1109,6 @@ impl PlexApp {
         );
         ui.add_space(12.0);
 
-        // Server Status Banner
         let server_name = self
             .server_status_val
             .get("friendly_name")
@@ -897,7 +1148,6 @@ impl PlexApp {
 
         ui.add_space(10.0);
 
-        // KPI Grid
         let lib_count = self
             .libraries_val
             .get("sections")
@@ -956,7 +1206,6 @@ impl PlexApp {
 
         ui.add_space(14.0);
 
-        // Active Sessions & Quick Actions
         let sessions_arr = self
             .sessions_val
             .get("sessions")
@@ -1033,39 +1282,75 @@ impl PlexApp {
 
         ui.add_space(14.0);
 
-        // Recently Added List
+        // Recently Added Poster Rail
         let recent_items = self
             .recently_added_val
             .get("items")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        card(ui, "Recently Added Media", |ui| {
+
+        let poster_paths: Vec<String> = recent_items
+            .iter()
+            .filter_map(|it| {
+                it.get("thumb")
+                    .or_else(|| it.get("art"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+        self.prefetch_posters(&poster_paths);
+
+        let mut select_target = None;
+
+        card(ui, "Recently Added Media (Posters)", |ui| {
             if recent_items.is_empty() {
                 ui.label(RichText::new("Querying recently added media...").color(SLATE_FAINT));
             } else {
-                for item in recent_items.iter().take(6) {
-                    let title = item
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Media Item");
-                    let kind = item.get("type").and_then(Value::as_str).unwrap_or("video");
-                    let year = item
-                        .get("year")
-                        .and_then(Value::as_i64)
-                        .map(|y| format!("{}", y))
-                        .unwrap_or_default();
+                egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("·").color(AMBER));
-                        ui.label(RichText::new(title).strong().color(Color32::WHITE));
-                        if !year.is_empty() {
-                            ui.label(RichText::new(format!("({})", year)).color(SLATE_MUTED));
+                        for item in recent_items.iter().take(10) {
+                            let r_key = item
+                                .get("ratingKey")
+                                .or_else(|| item.get("rating_key"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("0");
+                            let title = item
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Media Item");
+                            let year = item
+                                .get("year")
+                                .and_then(Value::as_i64)
+                                .map(|y| format!("{}", y));
+                            let thumb = item
+                                .get("thumb")
+                                .or_else(|| item.get("art"))
+                                .and_then(Value::as_str);
+                            let tex = thumb
+                                .and_then(|p| self.poster_cache.get(p))
+                                .and_then(|opt| opt.as_ref());
+
+                            if movie_card(ui, tex, title, year.as_deref(), false, 115.0) {
+                                select_target = Some(r_key.to_string());
+                            }
                         }
-                        ui.label(RichText::new(format!("[{}]", kind)).size(11.0).color(SKY));
                     });
-                }
+                });
             }
         });
+
+        if let Some(r_key) = select_target {
+            self.selected_rating_key = r_key.clone();
+            self.page = Page::Movies;
+            let tx = self.tx.clone();
+            let config = self.get_plex_config();
+            self.spawn(async move {
+                if let Ok(v) = dispatch(&config, Command::MediaGet { rating_key: r_key }).await {
+                    let _ = tx.send(Job::MediaDetail(v));
+                }
+            });
+        }
     }
 
     // 2. Inbox
@@ -1171,7 +1456,7 @@ impl PlexApp {
                         &config,
                         Command::LibraryBrowse {
                             section_key: key,
-                            limit: Some(25),
+                            limit: Some(40),
                             offset: Some(0),
                         },
                     )
@@ -1184,7 +1469,7 @@ impl PlexApp {
         }
     }
 
-    // 4. Movies & Media Inspector
+    // 4. Movies & Media Inspector with Poster Cards
     fn view_movies(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Movies & Media Inspector")
@@ -1193,14 +1478,40 @@ impl PlexApp {
         );
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Inspect media metadata, streams, file containers, and codecs.")
-                .color(SLATE_MUTED),
+            RichText::new(
+                "Browse media collection with poster cards, metadata, and stream telemetry.",
+            )
+            .color(SLATE_MUTED),
         );
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
+        // Section Selector Bar
         ui.horizontal(|ui| {
-            ui.label("Section Key:");
-            ui.text_edit_singleline(&mut self.selected_section_key);
+            ui.label("Section:");
+            egui::ComboBox::from_id_salt("movie_section_combo")
+                .selected_text(&self.selected_section_key)
+                .show_ui(ui, |ui| {
+                    if let Some(sections) =
+                        self.libraries_val.get("sections").and_then(Value::as_array)
+                    {
+                        for s in sections {
+                            let k = s.get("key").and_then(Value::as_str).unwrap_or("1");
+                            let t = s.get("title").and_then(Value::as_str).unwrap_or("Section");
+                            ui.selectable_value(
+                                &mut self.selected_section_key,
+                                k.to_string(),
+                                format!("{}: {}", k, t),
+                            );
+                        }
+                    } else {
+                        ui.selectable_value(
+                            &mut self.selected_section_key,
+                            "1".to_string(),
+                            "Section 1",
+                        );
+                    }
+                });
+
             if ui.button("Load Section Items").clicked() {
                 let tx = self.tx.clone();
                 let config = self.get_plex_config();
@@ -1210,7 +1521,7 @@ impl PlexApp {
                         &config,
                         Command::LibraryBrowse {
                             section_key: key,
-                            limit: Some(30),
+                            limit: Some(40),
                             offset: Some(0),
                         },
                     )
@@ -1220,6 +1531,21 @@ impl PlexApp {
                     }
                 });
             }
+
+            ui.separator();
+            ui.label("Filter:");
+            ui.text_edit_singleline(&mut self.movies_filter);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mode_label = if self.movies_view_grid {
+                    "View: Grid"
+                } else {
+                    "View: List"
+                };
+                if ui.button(mode_label).clicked() {
+                    self.movies_view_grid = !self.movies_view_grid;
+                }
+            });
         });
 
         ui.add_space(10.0);
@@ -1230,47 +1556,141 @@ impl PlexApp {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+
+        let filter_lower = self.movies_filter.to_lowercase();
+        let filtered_items: Vec<Value> = items
+            .into_iter()
+            .filter(|it| {
+                if filter_lower.is_empty() {
+                    return true;
+                }
+                let title = it.get("title").and_then(Value::as_str).unwrap_or("");
+                title.to_lowercase().contains(&filter_lower)
+            })
+            .collect();
+
+        // Prefetch posters for filtered items
+        let poster_paths: Vec<String> = filtered_items
+            .iter()
+            .filter_map(|it| {
+                it.get("thumb")
+                    .or_else(|| it.get("art"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+        self.prefetch_posters(&poster_paths);
+
         let mut inspect_target = None;
 
         ui.columns(2, |cols| {
+            // Left column: Movie posters grid or list
             cols[0].group(|ui| {
-                ui.heading(
-                    RichText::new("Section Items")
-                        .size(15.0)
-                        .color(Color32::WHITE),
-                );
-                ui.add_space(4.0);
-                if items.is_empty() {
-                    ui.label(RichText::new("Load section to view items.").color(SLATE_FAINT));
-                } else {
-                    for item in &items {
-                        let key = item
-                            .get("rating_key")
-                            .and_then(Value::as_str)
-                            .unwrap_or("0");
-                        let title = item.get("title").and_then(Value::as_str).unwrap_or("Title");
-                        let year = item
-                            .get("year")
-                            .and_then(Value::as_i64)
-                            .map(|y| format!("{}", y))
-                            .unwrap_or_default();
-                        let selected = self.selected_rating_key == key;
-                        let text = format!("{} ({})", title, year);
+                ui.horizontal(|ui| {
+                    ui.heading(
+                        RichText::new("Collection Items")
+                            .size(15.0)
+                            .color(Color32::WHITE),
+                    );
+                    ui.label(RichText::new(format!("({} titles)", filtered_items.len())).color(SLATE_FAINT));
+                });
+                ui.add_space(6.0);
 
-                        if ui.selectable_label(selected, text).clicked() {
-                            inspect_target = Some(key.to_string());
+                if filtered_items.is_empty() {
+                    ui.label(RichText::new("No items found. Click 'Load Section Items' to browse.").color(SLATE_FAINT));
+                } else if self.movies_view_grid {
+                    egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for item in &filtered_items {
+                                let key = item
+                                    .get("ratingKey")
+                                    .or_else(|| item.get("rating_key"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("0");
+                                let title = item.get("title").and_then(Value::as_str).unwrap_or("Title");
+                                let year = item
+                                    .get("year")
+                                    .and_then(Value::as_i64)
+                                    .map(|y| format!("{}", y));
+                                let selected = self.selected_rating_key == key;
+
+                                let thumb = item
+                                    .get("thumb")
+                                    .or_else(|| item.get("art"))
+                                    .and_then(Value::as_str);
+                                let tex = thumb
+                                    .and_then(|p| self.poster_cache.get(p))
+                                    .and_then(|opt| opt.as_ref());
+
+                                if movie_card(ui, tex, title, year.as_deref(), selected, 120.0) {
+                                    inspect_target = Some(key.to_string());
+                                }
+                            }
+                        });
+                    });
+                } else {
+                    // List view
+                    egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
+                        for item in &filtered_items {
+                            let key = item
+                                .get("ratingKey")
+                                .or_else(|| item.get("rating_key"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("0");
+                            let title = item.get("title").and_then(Value::as_str).unwrap_or("Title");
+                            let year = item
+                                .get("year")
+                                .and_then(Value::as_i64)
+                                .map(|y| format!("{}", y))
+                                .unwrap_or_default();
+                            let summary = item.get("summary").and_then(Value::as_str).unwrap_or("");
+                            let selected = self.selected_rating_key == key;
+
+                            let thumb = item
+                                .get("thumb")
+                                .or_else(|| item.get("art"))
+                                .and_then(Value::as_str);
+                            let tex = thumb
+                                .and_then(|p| self.poster_cache.get(p))
+                                .and_then(|opt| opt.as_ref());
+
+                            let bg = if selected { AMBER_GLOW } else { CARD_DARK };
+                            egui::Frame::NONE
+                                .fill(bg)
+                                .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { AMBER } else { BORDER_DARK }))
+                                .corner_radius(CornerRadius::same(6))
+                                .inner_margin(Margin::same(6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        render_poster_image(ui, tex, Vec2::new(40.0, 60.0), title);
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(format!("{} ({})", title, year)).strong().color(Color32::WHITE));
+                                            if !summary.is_empty() {
+                                                let blurb = if summary.len() > 100 { format!("{}…", &summary[..100]) } else { summary.to_string() };
+                                                ui.label(RichText::new(blurb).size(11.0).color(SLATE_MUTED));
+                                            }
+                                        });
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("Inspect").clicked() {
+                                                inspect_target = Some(key.to_string());
+                                            }
+                                        });
+                                    });
+                                });
+                            ui.add_space(4.0);
                         }
-                    }
+                    });
                 }
             });
 
+            // Right column: Detailed Media Inspector with Poster
             cols[1].group(|ui| {
                 ui.heading(
                     RichText::new("Media Item Inspector")
                         .size(15.0)
                         .color(Color32::WHITE),
                 );
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 if !self.media_detail_val.is_null() {
                     let title = self
                         .media_detail_val
@@ -1282,6 +1702,12 @@ impl PlexApp {
                         .get("summary")
                         .and_then(Value::as_str)
                         .unwrap_or("No summary provided.");
+                    let year = self
+                        .media_detail_val
+                        .get("year")
+                        .and_then(Value::as_i64)
+                        .map(|y| format!("{}", y))
+                        .unwrap_or_default();
                     let duration = self
                         .media_detail_val
                         .get("duration_ms")
@@ -1298,31 +1724,75 @@ impl PlexApp {
                         .get("video_codec")
                         .and_then(Value::as_str)
                         .unwrap_or("h264");
+                    let audio = self
+                        .media_detail_val
+                        .get("audio_codec")
+                        .and_then(Value::as_str)
+                        .unwrap_or("eac3");
 
-                    ui.label(
-                        RichText::new(title)
-                            .strong()
-                            .size(16.0)
-                            .color(Color32::WHITE),
-                    );
-                    ui.label(
-                        RichText::new(format!(
-                            "Duration: {} min · Video: {} ({})",
-                            duration, resolution, codec
-                        ))
-                        .color(AMBER),
-                    );
+                    let detail_thumb = self
+                        .media_detail_val
+                        .get("thumb")
+                        .or_else(|| self.media_detail_val.get("art"))
+                        .and_then(Value::as_str);
+
+                    let detail_tex = detail_thumb
+                        .and_then(|p| self.poster_cache.get(p))
+                        .and_then(|opt| opt.as_ref());
+
+                    // Large Poster + Metadata Header
+                    ui.horizontal(|ui| {
+                        render_poster_image(ui, detail_tex, Vec2::new(140.0, 210.0), title);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .size(17.0)
+                                    .color(Color32::WHITE),
+                            );
+                            if !year.is_empty() {
+                                ui.label(RichText::new(format!("Year: {}", year)).color(SLATE_MUTED));
+                            }
+                            if duration > 0 {
+                                ui.label(RichText::new(format!("Runtime: {} min", duration)).color(SLATE_MUTED));
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let badge_fill = Color32::from_rgb(33, 46, 68);
+                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                    ui.label(RichText::new(resolution).strong().color(AMBER));
+                                });
+                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                    ui.label(RichText::new(codec).strong().color(SKY));
+                                });
+                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                    ui.label(RichText::new(audio).strong().color(EMERALD));
+                                });
+                            });
+                        });
+                    });
+
+                    ui.add_space(10.0);
+                    ui.separator();
                     ui.add_space(6.0);
-                    ui.label(RichText::new(summary).color(SLATE_MUTED));
-                    ui.add_space(8.0);
 
-                    if ui.button("Enrich Metadata").clicked() {
-                        self.enrich_rating_key = self.selected_rating_key.clone();
-                        self.page = Page::Enrichment;
-                    }
+                    ui.label(RichText::new("Plot Synopsis:").strong().color(Color32::WHITE));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(summary).color(SLATE_MUTED));
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Enrich Metadata").clicked() {
+                            self.enrich_rating_key = self.selected_rating_key.clone();
+                            self.page = Page::Enrichment;
+                        }
+                        if ui.button("Inspect Raw JSON").clicked() {
+                            self.page = Page::RawJson;
+                        }
+                    });
                 } else {
                     ui.label(
-                        RichText::new("Select an item to inspect metadata and media streams.")
+                        RichText::new("Select a movie from the grid on the left to view poster art, stream specifications, and metadata.")
                             .color(SLATE_FAINT),
                     );
                 }
@@ -1403,7 +1873,7 @@ impl PlexApp {
         });
     }
 
-    // 6. Search
+    // 6. Search with Poster Thumbnails
     fn view_search(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Universal Search")
@@ -1443,6 +1913,18 @@ impl PlexApp {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+
+        let poster_paths: Vec<String> = results
+            .iter()
+            .filter_map(|it| {
+                it.get("thumb")
+                    .or_else(|| it.get("art"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .collect();
+        self.prefetch_posters(&poster_paths);
+
         let mut inspect_target = None;
 
         card(ui, "Search Results", |ui| {
@@ -1453,21 +1935,39 @@ impl PlexApp {
                     let title = r.get("title").and_then(Value::as_str).unwrap_or("Title");
                     let kind = r.get("type").and_then(Value::as_str).unwrap_or("item");
                     let r_key = r.get("rating_key").and_then(Value::as_str).unwrap_or("0");
+                    let thumb = r
+                        .get("thumb")
+                        .or_else(|| r.get("art"))
+                        .and_then(Value::as_str);
+                    let tex = thumb
+                        .and_then(|p| self.poster_cache.get(p))
+                        .and_then(|opt| opt.as_ref());
+
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("·").color(AMBER));
+                        render_poster_image(ui, tex, Vec2::new(36.0, 54.0), title);
                         ui.label(RichText::new(title).strong().color(Color32::WHITE));
                         ui.label(RichText::new(format!("[{}]", kind)).size(11.0).color(SKY));
-                        if ui.small_button("Inspect").clicked() {
-                            inspect_target = Some(r_key.to_string());
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Inspect").clicked() {
+                                inspect_target = Some(r_key.to_string());
+                            }
+                        });
                     });
+                    ui.separator();
                 }
             }
         });
 
         if let Some(r_key) = inspect_target {
-            self.selected_rating_key = r_key;
+            self.selected_rating_key = r_key.clone();
             self.page = Page::Movies;
+            let tx = self.tx.clone();
+            let config = self.get_plex_config();
+            self.spawn(async move {
+                if let Ok(v) = dispatch(&config, Command::MediaGet { rating_key: r_key }).await {
+                    let _ = tx.send(Job::MediaDetail(v));
+                }
+            });
         }
     }
 
@@ -1479,7 +1979,12 @@ impl PlexApp {
                 .size(22.0),
         );
         ui.add_space(4.0);
-        ui.label(RichText::new("Natural language similarity search over media plot summaries and synopsis vectors.").color(SLATE_MUTED));
+        ui.label(
+            RichText::new(
+                "Natural language similarity search over media plot summaries and synopsis vectors.",
+            )
+            .color(SLATE_MUTED),
+        );
         ui.add_space(12.0);
 
         ui.horizontal(|ui| {
@@ -1509,7 +2014,12 @@ impl PlexApp {
             .unwrap_or_default();
         card(ui, "Semantic Similarity Matches", |ui| {
             if matches.is_empty() {
-                ui.label(RichText::new("Enter a descriptive query like 'intense 80s sci-fi thrillers with cyborgs'").color(SLATE_FAINT));
+                ui.label(
+                    RichText::new(
+                        "Enter a descriptive query like 'intense 80s sci-fi thrillers with cyborgs'",
+                    )
+                    .color(SLATE_FAINT),
+                );
             } else {
                 for m in &matches {
                     let title = m.get("title").and_then(Value::as_str).unwrap_or("Title");
@@ -1751,7 +2261,6 @@ impl PlexApp {
 
         ui.add_space(8.0);
 
-        // Chat conversation history
         egui::ScrollArea::vertical()
             .max_height(400.0)
             .show(ui, |ui| {
@@ -1788,7 +2297,6 @@ impl PlexApp {
 
         ui.add_space(8.0);
 
-        // Input row
         ui.horizontal(|ui| {
             let resp = ui.text_edit_singleline(&mut self.chat_prompt);
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -2373,7 +2881,12 @@ impl PlexApp {
                 .size(22.0),
         );
         ui.add_space(4.0);
-        ui.label(RichText::new("Dispatch TTS announcements to speech-mcp (:10909) and telemetry to aiwatcher (:10946).").color(SLATE_MUTED));
+        ui.label(
+            RichText::new(
+                "Dispatch TTS announcements to speech-mcp (:10909) and telemetry to aiwatcher (:10946).",
+            )
+            .color(SLATE_MUTED),
+        );
         ui.add_space(12.0);
 
         card(ui, "Speech TTS Dispatch (:10909)", |ui| {
@@ -2673,6 +3186,8 @@ mod tests {
             card(ui, "Server Connection", |ui| {
                 ui.label("Plex connected");
             });
+            render_poster_image(ui, None, Vec2::new(60.0, 90.0), "Demo Film");
+            movie_card(ui, None, "Blade Runner", Some("1982"), false, 110.0);
         });
         harness.run();
     }
