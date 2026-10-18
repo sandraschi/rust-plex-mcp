@@ -1,7 +1,8 @@
 # HANDOVER -- `rust-plex-mcp`
 
-**Last Updated:** 2026-10-18T14:15:00+02:00
+**Last Updated:** 2026-10-18T17:06:00+02:00
 **Current Status:** Completed (v0.4.0 Released) -- All 5 Phases Complete
+**GitHub Release:** https://github.com/sandraschi/rust-plex-mcp/releases/tag/v0.4.0
 
 ## What Was Done
 
