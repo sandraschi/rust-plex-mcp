@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Pure-Rust Architecture**: Completed 3-crate ArtCraft architecture (`plex-core`, `rust-plex-mcp`, `plex-app`) replacing 80,000+ lines of Python/Node/Next.js/React.
+- **Movie Poster Art & Visual Parity**:
+  - Asynchronous poster thumbnail fetching and RGBA image decoding (`image` crate) off the UI thread via `fetch_image_bytes`.
+  - 2:3 aspect ratio responsive `movie_card` grid with hover effects and selection highlights matching the original webapp.
+  - Movie cards integrated into `Movies` view (with grid/list toggle), `Overview` view (horizontal Recently Added rail), `Search` view, and the `Media Inspector` detail card.
+  - Painted vector fallback clapperboard icon when posters are offline or loading.
 - **Full UI/UX Clone Parity**: Native `egui 0.37` desktop dashboard implementing all 19 views from the legacy Next.js webapp:
   - `Overview` (`/`): Real-time server telemetry, KPI grid, active playback streams, recently added media carousels.
   - `Inbox` (`/inbox`): Ingest queue, task statuses, unmatched file alerts.
