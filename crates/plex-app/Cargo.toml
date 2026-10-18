@@ -17,6 +17,7 @@ tokio = { workspace = true }
 eframe = { workspace = true }
 keyring = { workspace = true }
 image = { workspace = true }
+open = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }

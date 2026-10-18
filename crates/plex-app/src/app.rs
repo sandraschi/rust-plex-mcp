@@ -416,7 +416,16 @@ fn render_poster_image(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardAction {
+    None,
+    Clicked,
+    DoubleClicked,
+}
+
 /// Render a 2:3 aspect ratio Movie Poster Card matching the original webapp.
+///
+/// Supports hover play icon overlay, single-click inspection, and double-click playback.
 fn movie_card(
     ui: &mut egui::Ui,
     tex: Option<&egui::TextureHandle>,
@@ -424,7 +433,7 @@ fn movie_card(
     year: Option<&str>,
     selected: bool,
     card_width: f32,
-) -> bool {
+) -> CardAction {
     let card_height = (card_width * 1.5).round();
     let is_dark = ui.visuals().dark_mode;
     let bg = if selected {
@@ -448,12 +457,14 @@ fn movie_card(
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(6));
 
-    let mut clicked = false;
+    let mut action = CardAction::None;
     frame.show(ui, |ui| {
         ui.set_width(card_width);
         let resp = ui.allocate_response(Vec2::new(card_width, card_height), egui::Sense::click());
-        if resp.clicked() {
-            clicked = true;
+        if resp.double_clicked() {
+            action = CardAction::DoubleClicked;
+        } else if resp.clicked() {
+            action = CardAction::Clicked;
         }
 
         if let Some(t) = tex {
@@ -529,6 +540,19 @@ fn movie_card(
                 Stroke::new(1.5, AMBER),
                 StrokeKind::Inside,
             );
+
+            // Translucent play icon badge matching webapp PlayIcon
+            let c = resp.rect.center();
+            p.circle_filled(c, 20.0, Color32::from_rgba_premultiplied(0, 0, 0, 190));
+            p.circle_stroke(c, 20.0, Stroke::new(1.5, AMBER));
+            let p1 = Pos2::new(c.x - 5.0, c.y - 7.0);
+            let p2 = Pos2::new(c.x - 5.0, c.y + 7.0);
+            let p3 = Pos2::new(c.x + 7.0, c.y);
+            p.add(egui::Shape::convex_polygon(
+                vec![p1, p2, p3],
+                Color32::WHITE,
+                Stroke::NONE,
+            ));
         }
 
         ui.add_space(4.0);
@@ -541,8 +565,10 @@ fn movie_card(
             )
             .truncate(),
         );
-        if title_resp.clicked() {
-            clicked = true;
+        if title_resp.double_clicked() {
+            action = CardAction::DoubleClicked;
+        } else if title_resp.clicked() && action == CardAction::None {
+            action = CardAction::Clicked;
         }
         if let Some(y) = year {
             if !y.is_empty() {
@@ -551,7 +577,7 @@ fn movie_card(
         }
     });
 
-    clicked
+    action
 }
 
 impl PlexApp {
@@ -698,6 +724,94 @@ impl PlexApp {
                     let _ = tx.send(Job::PosterLoaded { path, bytes });
                 });
             }
+        }
+    }
+
+    fn play_media_item(&mut self, item: &Value) {
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Untitled");
+        let rating_key = item
+            .get("ratingKey")
+            .or_else(|| item.get("rating_key"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        // 1. Check for physical media file path (Plex Media -> Part -> file)
+        let local_file = item
+            .get("file")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                let media = item.get("Media")?.as_array()?;
+                for m in media {
+                    if let Some(parts) = m.get("Part").and_then(Value::as_array) {
+                        for p in parts {
+                            if let Some(f) = p.get("file").and_then(Value::as_str) {
+                                return Some(f.to_string());
+                            }
+                        }
+                    }
+                }
+                None
+            });
+
+        let mut launched = false;
+        if let Some(file_path) = local_file {
+            let p = std::path::Path::new(&file_path);
+            if p.exists() {
+                let target = file_path.clone();
+                self.spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || open::that(&target)).await;
+                });
+                self.status_line = format!("[Play] Playing local file: {} ({})", title, file_path);
+                self.log_event(format!(
+                    "[PLAY] Launched local media player for '{}' ({})",
+                    title, file_path
+                ));
+                launched = true;
+            }
+        }
+
+        if !launched {
+            // 2. Open Plex Web player URL in default browser
+            let server_url = if self.server_url.trim().is_empty() {
+                "http://127.0.0.1:32400".to_string()
+            } else {
+                self.server_url.trim_end_matches('/').to_string()
+            };
+
+            let machine_id = self
+                .server_status_val
+                .get("machine_identifier")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+
+            let player_url = if !machine_id.is_empty() && !rating_key.is_empty() {
+                format!(
+                    "{}/web/index.html#!/server/{}/details?key=%2Flibrary%2Fmetadata%2F{}",
+                    server_url, machine_id, rating_key
+                )
+            } else if !rating_key.is_empty() {
+                format!(
+                    "{}/web/index.html#!/details?key=%2Flibrary%2Fmetadata%2F{}",
+                    server_url, rating_key
+                )
+            } else {
+                format!("{}/web/index.html", server_url)
+            };
+
+            let target = player_url.clone();
+            self.spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || open::that(&target)).await;
+            });
+
+            self.status_line = format!("[Play] Opening in Plex Web: {}", title);
+            self.log_event(format!(
+                "[PLAY] Opened Plex Web player for '{}' ({})",
+                title, player_url
+            ));
         }
     }
 
@@ -1302,6 +1416,7 @@ impl PlexApp {
         self.prefetch_posters(&poster_paths);
 
         let mut select_target = None;
+        let mut play_target = None;
 
         card(ui, "Recently Added Media (Posters)", |ui| {
             if recent_items.is_empty() {
@@ -1331,7 +1446,10 @@ impl PlexApp {
                                 .and_then(|p| self.poster_cache.get(p))
                                 .and_then(|opt| opt.as_ref());
 
-                            if movie_card(ui, tex, title, year.as_deref(), false, 115.0) {
+                            let action = movie_card(ui, tex, title, year.as_deref(), false, 115.0);
+                            if action == CardAction::DoubleClicked {
+                                play_target = Some(item.clone());
+                            } else if action == CardAction::Clicked {
                                 select_target = Some(r_key.to_string());
                             }
                         }
@@ -1339,6 +1457,10 @@ impl PlexApp {
                 });
             }
         });
+
+        if let Some(item) = play_target {
+            self.play_media_item(&item);
+        }
 
         if let Some(r_key) = select_target {
             self.selected_rating_key = r_key.clone();
@@ -1582,6 +1704,7 @@ impl PlexApp {
         self.prefetch_posters(&poster_paths);
 
         let mut inspect_target = None;
+        let mut play_target = None;
 
         ui.columns(2, |cols| {
             // Left column: Movie posters grid or list
@@ -1622,7 +1745,10 @@ impl PlexApp {
                                     .and_then(|p| self.poster_cache.get(p))
                                     .and_then(|opt| opt.as_ref());
 
-                                if movie_card(ui, tex, title, year.as_deref(), selected, 120.0) {
+                                let action = movie_card(ui, tex, title, year.as_deref(), selected, 120.0);
+                                if action == CardAction::DoubleClicked {
+                                    play_target = Some(item.clone());
+                                } else if action == CardAction::Clicked {
                                     inspect_target = Some(key.to_string());
                                 }
                             }
@@ -1663,16 +1789,24 @@ impl PlexApp {
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         render_poster_image(ui, tex, Vec2::new(40.0, 60.0), title);
-                                        ui.vertical(|ui| {
+                                        let title_col = ui.vertical(|ui| {
                                             ui.label(RichText::new(format!("{} ({})", title, year)).strong().color(Color32::WHITE));
                                             if !summary.is_empty() {
                                                 let blurb = if summary.len() > 100 { format!("{}…", &summary[..100]) } else { summary.to_string() };
                                                 ui.label(RichText::new(blurb).size(11.0).color(SLATE_MUTED));
                                             }
                                         });
+                                        if title_col.response.double_clicked() {
+                                            play_target = Some(item.clone());
+                                        }
+
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if ui.button("Inspect").clicked() {
                                                 inspect_target = Some(key.to_string());
+                                            }
+                                            let play_btn = egui::Button::new(RichText::new("> Play").strong().color(Color32::BLACK)).fill(AMBER);
+                                            if ui.add(play_btn).clicked() {
+                                                play_target = Some(item.clone());
                                             }
                                         });
                                     });
@@ -1782,6 +1916,15 @@ impl PlexApp {
                     ui.add_space(10.0);
 
                     ui.horizontal(|ui| {
+                        let play_btn = egui::Button::new(
+                            RichText::new("> Play Movie")
+                                .strong()
+                                .color(Color32::BLACK),
+                        )
+                        .fill(AMBER);
+                        if ui.add(play_btn).clicked() {
+                            play_target = Some(self.media_detail_val.clone());
+                        }
                         if ui.button("Enrich Metadata").clicked() {
                             self.enrich_rating_key = self.selected_rating_key.clone();
                             self.page = Page::Enrichment;
@@ -1798,6 +1941,10 @@ impl PlexApp {
                 }
             });
         });
+
+        if let Some(item) = play_target {
+            self.play_media_item(&item);
+        }
 
         if let Some(r_key) = inspect_target {
             self.selected_rating_key = r_key.clone();
@@ -1926,6 +2073,7 @@ impl PlexApp {
         self.prefetch_posters(&poster_paths);
 
         let mut inspect_target = None;
+        let mut play_target = None;
 
         card(ui, "Search Results", |ui| {
             if results.is_empty() {
@@ -1943,7 +2091,7 @@ impl PlexApp {
                         .and_then(|p| self.poster_cache.get(p))
                         .and_then(|opt| opt.as_ref());
 
-                    ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
                         render_poster_image(ui, tex, Vec2::new(36.0, 54.0), title);
                         ui.label(RichText::new(title).strong().color(Color32::WHITE));
                         ui.label(RichText::new(format!("[{}]", kind)).size(11.0).color(SKY));
@@ -1951,12 +2099,26 @@ impl PlexApp {
                             if ui.button("Inspect").clicked() {
                                 inspect_target = Some(r_key.to_string());
                             }
+                            let play_btn = egui::Button::new(
+                                RichText::new("> Play").strong().color(Color32::BLACK),
+                            )
+                            .fill(AMBER);
+                            if ui.add(play_btn).clicked() {
+                                play_target = Some(r.clone());
+                            }
                         });
                     });
+                    if row.response.double_clicked() {
+                        play_target = Some(r.clone());
+                    }
                     ui.separator();
                 }
             }
         });
+
+        if let Some(item) = play_target {
+            self.play_media_item(&item);
+        }
 
         if let Some(r_key) = inspect_target {
             self.selected_rating_key = r_key.clone();
@@ -3187,7 +3349,7 @@ mod tests {
                 ui.label("Plex connected");
             });
             render_poster_image(ui, None, Vec2::new(60.0, 90.0), "Demo Film");
-            movie_card(ui, None, "Blade Runner", Some("1982"), false, 110.0);
+            let _ = movie_card(ui, None, "Blade Runner", Some("1982"), false, 110.0);
         });
         harness.run();
     }
