@@ -411,7 +411,8 @@ impl PlexClient {
         let url = if clean_path.starts_with("http://") || clean_path.starts_with("https://") {
             clean_path.to_string()
         } else {
-            format!("{}{}", self.server_url, clean_path)
+            let sep = if clean_path.starts_with('/') { "" } else { "/" };
+            format!("{}{sep}{clean_path}", self.server_url)
         };
         let response = self
             .http
@@ -482,7 +483,7 @@ fn urlencode(raw: &str) -> String {
 
 const DEMO_IDENTITY: &str = r#"{"MediaContainer":{"friendlyName":"Demo Plex Server","machineIdentifier":"demo-machine-id","version":"1.0.0-demo","myPlex":false,"size":0}}"#;
 const DEMO_SECTIONS: &str = r#"{"MediaContainer":{"size":3,"Directory":[{"key":"1","type":"movie","title":"Demo Movies","agent":"demo","scanner":"demo"},{"key":"2","type":"show","title":"Demo Shows","agent":"demo","scanner":"demo"},{"key":"3","type":"artist","title":"Demo Music","agent":"demo","scanner":"demo"}]}}"#;
-const DEMO_ITEMS: &str = r#"{"MediaContainer":{"size":2,"Metadata":[{"ratingKey":"101","key":"/library/metadata/101","type":"movie","title":"Demo Feature Film","summary":"A sample item for offline smoke tests.","year":2024,"duration":5400000},{"ratingKey":"102","key":"/library/metadata/102","type":"movie","title":"Demo Second Feature","year":2023,"duration":4800000}]}}"#;
+const DEMO_ITEMS: &str = r#"{"MediaContainer":{"size":2,"Metadata":[{"ratingKey":"101","key":"/library/metadata/101","type":"movie","title":"Demo Feature Film","summary":"A sample item for offline smoke tests.","year":2024,"duration":5400000,"thumb":"/library/metadata/101/thumb/demo"},{"ratingKey":"102","key":"/library/metadata/102","type":"movie","title":"Demo Second Feature","year":2023,"duration":4800000,"thumb":"/library/metadata/102/thumb/demo"}]}}"#;
 
 fn demo_container(raw: &str) -> Result<MediaContainer, DeviceError> {
     serde_json::from_str::<ContainerEnvelope>(raw)
@@ -594,6 +595,17 @@ pub fn demo_image() -> Vec<u8> {
         0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ]
+}
+
+/// Unified image fetcher that routes Live to PlexClient and Demo to demo_image().
+pub async fn fetch_image_bytes(config: &PlexConfig, path: &str) -> Result<Vec<u8>, DeviceError> {
+    match &config.vendor {
+        Vendor::Live { .. } => {
+            let client = PlexClient::new(config)?;
+            client.fetch_image(path).await
+        }
+        Vendor::Demo => Ok(demo_image()),
+    }
 }
 
 /// Demo playback control result.

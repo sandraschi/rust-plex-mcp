@@ -22,4 +22,4 @@ pub mod plex;
 
 pub use command::{dispatch, dispatch_auto, Command};
 pub use error::DeviceError;
-pub use plex::{PlexClient, PlexConfig, Vendor};
+pub use plex::{fetch_image_bytes, PlexClient, PlexConfig, Vendor};

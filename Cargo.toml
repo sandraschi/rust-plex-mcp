@@ -25,3 +25,4 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 keyring = "4"
 eframe = "0.37"
 egui_kittest = "0.37"
+image = "0.25"
