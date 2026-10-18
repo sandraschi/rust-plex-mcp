@@ -205,6 +205,40 @@ pub struct DirectoryItem {
     pub uuid: Option<String>,
 }
 
+/// A physical media file part inside a media stream.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MediaPartItem {
+    #[serde(default, rename = "id")]
+    pub id: Option<i64>,
+    #[serde(default, rename = "key")]
+    pub key: Option<String>,
+    #[serde(default, rename = "file")]
+    pub file: Option<String>,
+    #[serde(default, rename = "duration")]
+    pub duration: Option<i64>,
+    #[serde(default, rename = "size")]
+    pub size: Option<i64>,
+    #[serde(default, rename = "container")]
+    pub container: Option<String>,
+}
+
+/// A media stream specification (video/audio format and part pointers).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MediaStreamItem {
+    #[serde(default, rename = "id")]
+    pub id: Option<i64>,
+    #[serde(default, rename = "videoCodec")]
+    pub video_codec: Option<String>,
+    #[serde(default, rename = "videoResolution")]
+    pub video_resolution: Option<String>,
+    #[serde(default, rename = "audioCodec")]
+    pub audio_codec: Option<String>,
+    #[serde(default, rename = "container")]
+    pub container: Option<String>,
+    #[serde(default, rename = "Part")]
+    pub part: Vec<MediaPartItem>,
+}
+
 /// A media item (movie, episode, track, photo, session; PascalCase keys).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MetadataItem {
@@ -228,6 +262,8 @@ pub struct MetadataItem {
     pub thumb: Option<String>,
     #[serde(default, rename = "art")]
     pub art: Option<String>,
+    #[serde(default, rename = "Media")]
+    pub media: Vec<MediaStreamItem>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -347,6 +383,7 @@ impl PlexClient {
                 view_count: None,
                 thumb: None,
                 art: None,
+                media: Vec::new(),
             }));
         }
         Ok(items)
@@ -555,6 +592,7 @@ pub fn demo_playlists() -> Vec<MetadataItem> {
             view_count: Some(5),
             thumb: None,
             art: None,
+            media: Vec::new(),
         },
         MetadataItem {
             rating_key: Some("1002".to_string()),
@@ -567,6 +605,7 @@ pub fn demo_playlists() -> Vec<MetadataItem> {
             view_count: Some(0),
             thumb: None,
             art: None,
+            media: Vec::new(),
         },
     ]
 }

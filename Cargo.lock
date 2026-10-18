@@ -3607,6 +3607,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "keyring",
+ "open",
  "plex-core",
  "serde",
  "serde_json",
