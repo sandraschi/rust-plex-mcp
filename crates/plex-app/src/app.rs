@@ -9,6 +9,7 @@ use crate::browser::{
     amber, faint, filter_sort_page, ink, letter_row, page_bar, present_letters, sort_combo, sub,
     trunc, SortMode, AMBER_DARK, FAINT_LIGHT, INK_LIGHT, PAGE_GRID, PAGE_LIST, SUB_LIGHT,
 };
+use crate::richchat::{ChatIntent, ChatPersona, RichChat};
 use eframe::egui::{
     self, Color32, CornerRadius, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, Vec2,
 };
@@ -30,6 +31,39 @@ const ROSE: Color32 = Color32::from_rgb(244, 63, 94);
 const SKY: Color32 = Color32::from_rgb(14, 165, 233);
 const SLATE_MUTED: Color32 = Color32::from_rgb(148, 163, 184);
 const SLATE_FAINT: Color32 = Color32::from_rgb(100, 116, 139);
+
+/// Repo skill identity for the chat page: the preprompt makes every
+/// answer library-aware, personas specialize it per task.
+const PLEX_SKILL_NAME: &str = "plex-skill";
+const PLEX_SKILL_PREAMBLE: &str = "You are Plex Assistant, an expert on the user's media collection. Answer concisely with titles, years, and where to find items in the library.";
+
+fn plex_personas() -> Vec<ChatPersona> {
+    vec![
+        ChatPersona::new(
+            "librarian",
+            "Librarian",
+            "Help organize, match, and clean metadata. Prefer exact titles and years.",
+        ),
+        ChatPersona::new(
+            "critic",
+            "Critic",
+            "Recommend what to watch with taste and strong opinions. Justify each pick.",
+        ),
+        ChatPersona::new(
+            "technician",
+            "Technician",
+            "Diagnose transcoding, bandwidth, and server issues with concrete steps.",
+        ),
+    ]
+}
+
+fn plex_examples() -> Vec<String> {
+    vec![
+        "What should I watch tonight?".to_string(),
+        "Find unwatched 4K movies.".to_string(),
+        "Why is transcoding slow?".to_string(),
+    ]
+}
 
 const LLM_PROVIDERS: &[(&str, &str, &str, &str)] = &[
     (
@@ -221,11 +255,10 @@ pub struct PlexApp {
     selected_tool_name: String,
     tool_args_raw: String,
 
-    // Chat state
+    // Chat state (history, personas, streaming live in the richchat kernel)
     chat_provider: String,
     chat_model: String,
-    chat_prompt: String,
-    chat_history: Vec<(String, String)>,
+    rich: RichChat,
 
     // Crossconnect state
     speak_text: String,
@@ -707,8 +740,12 @@ impl PlexApp {
 
             chat_provider: "ollama".to_string(),
             chat_model: "gemma4:12b".to_string(),
-            chat_prompt: String::new(),
-            chat_history: Vec::new(),
+            rich: RichChat::new(
+                PLEX_SKILL_NAME,
+                PLEX_SKILL_PREAMBLE,
+                plex_personas(),
+                plex_examples(),
+            ),
 
             speak_text: "Plex server online. Media library indexed.".to_string(),
             speech_url: "http://127.0.0.1:10909".to_string(),
@@ -1038,8 +1075,7 @@ impl PlexApp {
                 }
                 Job::ChatReply(v) => {
                     let reply = v.get("reply").and_then(Value::as_str).unwrap_or("No reply");
-                    self.chat_history
-                        .push(("Assistant".to_string(), reply.to_string()));
+                    self.rich.push_chunk(reply);
                     self.last_raw = v;
                     self.status_line = "Chat reply received".to_string();
                 }
@@ -2765,70 +2801,17 @@ impl PlexApp {
 
             ui.label("Model:");
             ui.text_edit_singleline(&mut self.chat_model);
-
-            if ui.button("Clear Conversation").clicked() {
-                self.chat_history.clear();
-            }
         });
 
         ui.add_space(8.0);
 
-        egui::ScrollArea::vertical()
-            .max_height(400.0)
-            .show(ui, |ui| {
-                for (sender, msg) in &self.chat_history {
-                    let is_dark = ui.visuals().dark_mode;
-                    let is_user = sender == "User";
-                    let bg = if is_dark {
-                        if is_user {
-                            Color32::from_rgb(26, 36, 54)
-                        } else {
-                            Color32::from_rgb(33, 46, 68)
-                        }
-                    } else if is_user {
-                        Color32::from_rgb(226, 232, 240)
-                    } else {
-                        Color32::WHITE
-                    };
-                    let border = if is_user {
-                        if is_dark {
-                            Color32::from_rgb(51, 65, 85)
-                        } else {
-                            Color32::from_rgb(148, 163, 184)
-                        }
-                    } else {
-                        amber(ui)
-                    };
-
-                    egui::Frame::NONE
-                        .fill(bg)
-                        .stroke(Stroke::new(1.5, border))
-                        .inner_margin(Margin::same(8))
-                        .corner_radius(CornerRadius::same(6))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(sender).strong().color(if is_user {
-                                SKY
-                            } else {
-                                amber(ui)
-                            }));
-                            ui.add_space(2.0);
-                            let msg_color = ink(ui);
-                            ui.label(RichText::new(msg).color(msg_color));
-                        });
-                    ui.add_space(6.0);
-                }
-            });
-
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            let resp = ui.text_edit_singleline(&mut self.chat_prompt);
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("Send").clicked() || enter) && !self.chat_prompt.trim().is_empty() {
-                let prompt = self.chat_prompt.trim().to_string();
-                self.chat_history.push(("User".to_string(), prompt.clone()));
-                self.chat_prompt.clear();
-
+        let intent = self.rich.show(ui);
+        match intent {
+            ChatIntent::Idle => {}
+            ChatIntent::Cleared | ChatIntent::Exported => {
+                self.status_line = "Chat transcript exported to clipboard.".to_string();
+            }
+            ChatIntent::Send { prompt, system } => {
                 let tx = self.tx.clone();
                 let provider = self.chat_provider.clone();
                 let model = Some(self.chat_model.clone());
@@ -2848,10 +2831,7 @@ impl PlexApp {
                         provider,
                         model,
                         prompt,
-                        system: Some(
-                            "You are Plex Assistant, an expert on the user's media collection."
-                                .to_string(),
-                        ),
+                        system: Some(system),
                         context: None,
                         base_url,
                         api_key,
@@ -2862,7 +2842,7 @@ impl PlexApp {
                     }
                 });
             }
-        });
+        }
     }
 
     // 13. Tools

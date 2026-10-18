@@ -16,6 +16,7 @@ use std::path::PathBuf;
 mod app;
 mod browser;
 mod registry;
+mod richchat;
 mod vault;
 
 fn install_forensic_panic_hook() {
