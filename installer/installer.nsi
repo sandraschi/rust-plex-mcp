@@ -1,11 +1,11 @@
-; Plex (Rust) v0.1.0 — current-user installer (no admin, no UAC).
+; Plex (Rust) v0.4.0 -- current-user installer (no admin, no UAC).
 ; Built with NSIS 3 (makensis installer/installer.nsi, CWD = repo root).
 ; Installs the egui dashboard + the CLI/MCP server side by side.
 
 !include "MUI2.nsh"
 
-Name "Plex (Rust) 0.1.0"
-OutFile "..\target\release\bundle\Plex-Rust-0.1.0-setup.exe"
+Name "Plex (Rust) 0.4.0"
+OutFile "..\target\release\bundle\Plex-Rust-0.4.0-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\rust-plex-mcp"
 RequestExecutionLevel user
 
@@ -21,13 +21,13 @@ Section "Binaries" SecBinaries
   File "..\target\release\rust-plex-mcp.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\rust-plex-mcp" \
-    "DisplayName" "Plex (Rust) 0.1.0"
+    "DisplayName" "Plex (Rust) 0.4.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\rust-plex-mcp" \
     "UninstallString" "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\rust-plex-mcp" \
     "DisplayIcon" "$INSTDIR\plex-app.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\rust-plex-mcp" \
-    "DisplayVersion" "0.1.0"
+    "DisplayVersion" "0.4.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\rust-plex-mcp" \
     "Publisher" "sandraschi"
 SectionEnd
