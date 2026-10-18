@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 mod app;
+mod browser;
 mod registry;
 mod vault;
 

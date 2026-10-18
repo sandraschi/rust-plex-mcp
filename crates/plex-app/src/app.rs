@@ -5,6 +5,10 @@
 //! - Zero `ctx.set_visuals()` or `ctx.set_zoom_factor()` inside `ctx.input(|i| ...)`.
 //! - Strict glyph allowlist (`°`, `×`, `·`, `…`) verified at compile/test time by `glyph_source_scan`.
 
+use crate::browser::{
+    amber, faint, filter_sort_page, ink, letter_row, page_bar, present_letters, sort_combo, sub,
+    trunc, SortMode, AMBER_DARK, FAINT_LIGHT, INK_LIGHT, PAGE_GRID, PAGE_LIST, SUB_LIGHT,
+};
 use eframe::egui::{
     self, Color32, CornerRadius, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, Vec2,
 };
@@ -26,63 +30,6 @@ const ROSE: Color32 = Color32::from_rgb(244, 63, 94);
 const SKY: Color32 = Color32::from_rgb(14, 165, 233);
 const SLATE_MUTED: Color32 = Color32::from_rgb(148, 163, 184);
 const SLATE_FAINT: Color32 = Color32::from_rgb(100, 116, 139);
-/// Amber darkened for text on light backgrounds (amber-700; raw AMBER
-/// fails contrast on white).
-const AMBER_DARK: Color32 = Color32::from_rgb(180, 83, 9);
-const INK_LIGHT: Color32 = Color32::from_rgb(15, 23, 42);
-const SUB_LIGHT: Color32 = Color32::from_rgb(51, 65, 85);
-const FAINT_LIGHT: Color32 = Color32::from_rgb(71, 85, 105);
-
-/// Primary text: near-white in dark mode, slate-900 in light mode.
-/// Use for every heading / title / body label instead of `Color32::WHITE`.
-fn ink(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        Color32::from_rgb(241, 245, 249)
-    } else {
-        INK_LIGHT
-    }
-}
-
-/// Secondary text (was hardcoded `SLATE_MUTED`, unreadable on white).
-fn sub(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        SLATE_MUTED
-    } else {
-        SUB_LIGHT
-    }
-}
-
-/// Faint text (was hardcoded `SLATE_FAINT`, invisible on white).
-fn faint(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        SLATE_FAINT
-    } else {
-        FAINT_LIGHT
-    }
-}
-
-/// Accent text/border that stays readable on both themes.
-fn amber(ui: &egui::Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        AMBER
-    } else {
-        AMBER_DARK
-    }
-}
-
-/// Char-boundary-safe truncation. The old `&title[..14]` byte slices
-/// panicked on multibyte titles (e.g. Japanese library names).
-fn trunc(text: &str, max_chars: usize) -> &str {
-    if text.chars().count() <= max_chars {
-        return text;
-    }
-    let end = text
-        .char_indices()
-        .nth(max_chars)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len());
-    &text[..end]
-}
 
 const LLM_PROVIDERS: &[(&str, &str, &str, &str)] = &[
     (
@@ -250,9 +197,22 @@ pub struct PlexApp {
     fetching_posters: HashSet<String>,
     movies_view_grid: bool,
     movies_filter: String,
+    movies_sort: SortMode,
+    movies_page: usize,
+    movies_letter: Option<char>,
+
+    // Libraries browser state
+    libs_query: String,
+    libs_sort: SortMode,
+    libs_page: usize,
+    libs_letter: Option<char>,
 
     // Search and filter inputs
     search_query: String,
+    search_mode_grid: bool,
+    search_sort: SortMode,
+    search_page: usize,
+    search_letter: Option<char>,
     semantic_query: String,
     semantic_top_k: usize,
     selected_section_key: String,
@@ -723,8 +683,20 @@ impl PlexApp {
             fetching_posters: HashSet::new(),
             movies_view_grid: true,
             movies_filter: String::new(),
+            movies_sort: SortMode::default(),
+            movies_page: 0,
+            movies_letter: None,
+
+            libs_query: String::new(),
+            libs_sort: SortMode::default(),
+            libs_page: 0,
+            libs_letter: None,
 
             search_query: String::new(),
+            search_mode_grid: false,
+            search_sort: SortMode::default(),
+            search_page: 0,
+            search_letter: None,
             semantic_query: String::new(),
             semantic_top_k: 5,
             selected_section_key: "1".to_string(),
@@ -1628,8 +1600,43 @@ impl PlexApp {
                 RichText::new("No libraries loaded. Click refresh to query Plex.").color(faint(ui)),
             );
         } else {
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                if ui.text_edit_singleline(&mut self.libs_query).changed() {
+                    self.libs_page = 0;
+                }
+                ui.separator();
+                sort_combo(
+                    ui,
+                    "libs_sort_combo",
+                    &mut self.libs_sort,
+                    &mut self.libs_page,
+                );
+            });
+            ui.add_space(6.0);
+            letter_row(
+                ui,
+                &present_letters(&sections),
+                &mut self.libs_letter,
+                &mut self.libs_page,
+            );
+            ui.add_space(6.0);
+            let (visible, pages, total) = filter_sort_page(
+                &sections,
+                &self.libs_query.clone(),
+                self.libs_letter,
+                self.libs_sort,
+                self.libs_page,
+                PAGE_LIST,
+            );
+            self.libs_page = self.libs_page.min(pages - 1);
+            page_bar(ui, &mut self.libs_page, pages, total);
+            ui.add_space(6.0);
+            if visible.is_empty() {
+                ui.label(RichText::new("No libraries match this filter.").color(faint(ui)));
+            }
             let mut browse_target = None;
-            for section in &sections {
+            for section in visible {
                 let key = section.get("key").and_then(Value::as_str).unwrap_or("1");
                 let title = section
                     .get("title")
@@ -1666,7 +1673,7 @@ impl PlexApp {
                         &config,
                         Command::LibraryBrowse {
                             section_key: key,
-                            limit: Some(40),
+                            limit: Some(100),
                             offset: Some(0),
                         },
                     )
@@ -1731,7 +1738,7 @@ impl PlexApp {
                         &config,
                         Command::LibraryBrowse {
                             section_key: key,
-                            limit: Some(40),
+                            limit: Some(100),
                             offset: Some(0),
                         },
                     )
@@ -1744,7 +1751,16 @@ impl PlexApp {
 
             ui.separator();
             ui.label("Filter:");
-            ui.text_edit_singleline(&mut self.movies_filter);
+            if ui.text_edit_singleline(&mut self.movies_filter).changed() {
+                self.movies_page = 0;
+            }
+            ui.separator();
+            sort_combo(
+                ui,
+                "movies_sort_combo",
+                &mut self.movies_sort,
+                &mut self.movies_page,
+            );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mode_label = if self.movies_view_grid {
@@ -1767,19 +1783,33 @@ impl PlexApp {
             .cloned()
             .unwrap_or_default();
 
-        let filter_lower = self.movies_filter.to_lowercase();
-        let filtered_items: Vec<Value> = items
-            .into_iter()
-            .filter(|it| {
-                if filter_lower.is_empty() {
-                    return true;
-                }
-                let title = it.get("title").and_then(Value::as_str).unwrap_or("");
-                title.to_lowercase().contains(&filter_lower)
-            })
-            .collect();
+        ui.add_space(6.0);
+        letter_row(
+            ui,
+            &present_letters(&items),
+            &mut self.movies_letter,
+            &mut self.movies_page,
+        );
+        ui.add_space(6.0);
 
-        // Prefetch posters for filtered items
+        let per_page = if self.movies_view_grid {
+            PAGE_GRID
+        } else {
+            PAGE_LIST
+        };
+        let (filtered_items, pages, total) = filter_sort_page(
+            &items,
+            &self.movies_filter.clone(),
+            self.movies_letter,
+            self.movies_sort,
+            self.movies_page,
+            per_page,
+        );
+        self.movies_page = self.movies_page.min(pages - 1);
+        page_bar(ui, &mut self.movies_page, pages, total);
+        ui.add_space(6.0);
+
+        // Prefetch posters for the visible page only, not the whole list.
         let poster_paths: Vec<String> = filtered_items
             .iter()
             .filter_map(|it| {
@@ -1803,7 +1833,7 @@ impl PlexApp {
                             .size(15.0)
                             .color(ink(ui)),
                     );
-                    ui.label(RichText::new(format!("({} titles)", filtered_items.len())).color(faint(ui)));
+                    ui.label(RichText::new(format!("({} titles)", total)).color(faint(ui)));
                 });
                 ui.add_space(6.0);
 
@@ -1835,7 +1865,7 @@ impl PlexApp {
 
                                 let action = movie_card(ui, tex, title, year.as_deref(), selected, 120.0);
                                 if action == CardAction::DoubleClicked {
-                                    play_target = Some(item.clone());
+                                    play_target = Some((**item).clone());
                                 } else if action == CardAction::Clicked {
                                     inspect_target = Some(key.to_string());
                                 }
@@ -1910,7 +1940,7 @@ impl PlexApp {
                                             }
                                         });
                                         if title_col.response.double_clicked() {
-                                            play_target = Some(item.clone());
+                                            play_target = Some((**item).clone());
                                         }
 
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1919,7 +1949,7 @@ impl PlexApp {
                                             }
                                             let play_btn = egui::Button::new(RichText::new("> Play").strong().color(Color32::BLACK)).fill(AMBER);
                                             if ui.add(play_btn).clicked() {
-                                                play_target = Some(item.clone());
+                                                play_target = Some((**item).clone());
                                             }
                                         });
                                     });
@@ -2200,7 +2230,50 @@ impl PlexApp {
             .cloned()
             .unwrap_or_default();
 
-        let poster_paths: Vec<String> = results
+        ui.horizontal(|ui| {
+            let mode_label = if self.search_mode_grid {
+                "View: Grid"
+            } else {
+                "View: List"
+            };
+            if ui.button(mode_label).clicked() {
+                self.search_mode_grid = !self.search_mode_grid;
+            }
+            ui.separator();
+            sort_combo(
+                ui,
+                "search_sort_combo",
+                &mut self.search_sort,
+                &mut self.search_page,
+            );
+        });
+        ui.add_space(6.0);
+        letter_row(
+            ui,
+            &present_letters(&results),
+            &mut self.search_letter,
+            &mut self.search_page,
+        );
+        ui.add_space(6.0);
+
+        let per_page = if self.search_mode_grid {
+            PAGE_GRID
+        } else {
+            PAGE_LIST
+        };
+        let (visible, pages, total) = filter_sort_page(
+            &results,
+            "",
+            self.search_letter,
+            self.search_sort,
+            self.search_page,
+            per_page,
+        );
+        self.search_page = self.search_page.min(pages - 1);
+        page_bar(ui, &mut self.search_page, pages, total);
+        ui.add_space(6.0);
+
+        let poster_paths: Vec<String> = visible
             .iter()
             .filter_map(|it| {
                 it.get("thumb")
@@ -2217,11 +2290,46 @@ impl PlexApp {
         card(ui, "Search Results", |ui| {
             if results.is_empty() {
                 ui.label(RichText::new("Enter a search term and press Search.").color(faint(ui)));
+            } else if visible.is_empty() {
+                ui.label(RichText::new("No results on this page.").color(faint(ui)));
+            } else if self.search_mode_grid {
+                ui.horizontal_wrapped(|ui| {
+                    for r in visible {
+                        let title = r.get("title").and_then(Value::as_str).unwrap_or("Title");
+                        let year = r
+                            .get("year")
+                            .and_then(Value::as_i64)
+                            .map(|y| format!("{y}"));
+                        let r_key = r
+                            .get("ratingKey")
+                            .or_else(|| r.get("rating_key"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("0");
+                        let thumb = r
+                            .get("thumb")
+                            .or_else(|| r.get("art"))
+                            .and_then(Value::as_str);
+                        let tex = thumb
+                            .and_then(|p| self.poster_cache.get(p))
+                            .and_then(|opt| opt.as_ref());
+                        let selected = self.selected_rating_key == r_key;
+                        let action = movie_card(ui, tex, title, year.as_deref(), selected, 120.0);
+                        if action == CardAction::DoubleClicked {
+                            play_target = Some((*r).clone());
+                        } else if action == CardAction::Clicked {
+                            inspect_target = Some(r_key.to_string());
+                        }
+                    }
+                });
             } else {
-                for r in &results {
+                for r in visible {
                     let title = r.get("title").and_then(Value::as_str).unwrap_or("Title");
                     let kind = r.get("type").and_then(Value::as_str).unwrap_or("item");
-                    let r_key = r.get("rating_key").and_then(Value::as_str).unwrap_or("0");
+                    let r_key = r
+                        .get("ratingKey")
+                        .or_else(|| r.get("rating_key"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("0");
                     let thumb = r
                         .get("thumb")
                         .or_else(|| r.get("art"))
@@ -2233,7 +2341,11 @@ impl PlexApp {
                     let row = ui.horizontal(|ui| {
                         render_poster_image(ui, tex, Vec2::new(36.0, 54.0), title);
                         ui.label(RichText::new(title).strong().color(ink(ui)));
-                        ui.label(RichText::new(format!("[{}]", kind)).size(11.0).color(SKY));
+                        ui.label(
+                            RichText::new(format!("[{kind}]"))
+                                .size(11.0)
+                                .color(amber(ui)),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Inspect").clicked() {
                                 inspect_target = Some(r_key.to_string());
@@ -2243,12 +2355,12 @@ impl PlexApp {
                             )
                             .fill(AMBER);
                             if ui.add(play_btn).clicked() {
-                                play_target = Some(r.clone());
+                                play_target = Some((*r).clone());
                             }
                         });
                     });
                     if row.response.double_clicked() {
-                        play_target = Some(r.clone());
+                        play_target = Some((*r).clone());
                     }
                     ui.separator();
                 }
