@@ -26,6 +26,63 @@ const ROSE: Color32 = Color32::from_rgb(244, 63, 94);
 const SKY: Color32 = Color32::from_rgb(14, 165, 233);
 const SLATE_MUTED: Color32 = Color32::from_rgb(148, 163, 184);
 const SLATE_FAINT: Color32 = Color32::from_rgb(100, 116, 139);
+/// Amber darkened for text on light backgrounds (amber-700; raw AMBER
+/// fails contrast on white).
+const AMBER_DARK: Color32 = Color32::from_rgb(180, 83, 9);
+const INK_LIGHT: Color32 = Color32::from_rgb(15, 23, 42);
+const SUB_LIGHT: Color32 = Color32::from_rgb(51, 65, 85);
+const FAINT_LIGHT: Color32 = Color32::from_rgb(71, 85, 105);
+
+/// Primary text: near-white in dark mode, slate-900 in light mode.
+/// Use for every heading / title / body label instead of `Color32::WHITE`.
+fn ink(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(241, 245, 249)
+    } else {
+        INK_LIGHT
+    }
+}
+
+/// Secondary text (was hardcoded `SLATE_MUTED`, unreadable on white).
+fn sub(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        SLATE_MUTED
+    } else {
+        SUB_LIGHT
+    }
+}
+
+/// Faint text (was hardcoded `SLATE_FAINT`, invisible on white).
+fn faint(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        SLATE_FAINT
+    } else {
+        FAINT_LIGHT
+    }
+}
+
+/// Accent text/border that stays readable on both themes.
+fn amber(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        AMBER
+    } else {
+        AMBER_DARK
+    }
+}
+
+/// Char-boundary-safe truncation. The old `&title[..14]` byte slices
+/// panicked on multibyte titles (e.g. Japanese library names).
+fn trunc(text: &str, max_chars: usize) -> &str {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    &text[..end]
+}
 
 const LLM_PROVIDERS: &[(&str, &str, &str, &str)] = &[
     (
@@ -179,6 +236,7 @@ pub struct PlexApp {
     semantic_results_val: Value,
     rag_status_val: Value,
     canon_val: Value,
+    canon_source: String,
     taste_val: Value,
     enrich_val: Value,
     repair_val: Value,
@@ -260,8 +318,21 @@ pub fn crisp_light_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::light();
     v.panel_fill = Color32::from_rgb(248, 250, 252);
     v.window_fill = Color32::from_rgb(255, 255, 255);
-    v.override_text_color = Some(Color32::from_rgb(15, 23, 42));
+    v.override_text_color = Some(INK_LIGHT);
+    v.widgets.noninteractive.bg_fill = Color32::from_rgb(241, 245, 249);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, SUB_LIGHT);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
+    v.widgets.inactive.bg_fill = Color32::WHITE;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, INK_LIGHT);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.5, Color32::from_rgb(148, 163, 184));
+    v.widgets.hovered.bg_fill = Color32::from_rgb(226, 232, 240);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, INK_LIGHT);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.5, AMBER_DARK);
+    v.widgets.active.bg_fill = Color32::from_rgb(226, 232, 240);
+    v.widgets.active.fg_stroke = Stroke::new(1.5, AMBER_DARK);
+    v.widgets.active.bg_stroke = Stroke::new(1.5, AMBER_DARK);
+    v.selection.bg_fill = AMBER;
+    v.selection.stroke = Stroke::new(1.0, Color32::BLACK);
     v
 }
 
@@ -275,46 +346,53 @@ pub fn apply_theme(ctx: &egui::Context, theme: Theme) {
 pub fn card_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     let is_dark = ui.visuals().dark_mode;
     let fill = if is_dark { CARD_DARK } else { Color32::WHITE };
+    // 1px slate-700 on slate-900 was near-invisible; 1.5px slate-500 (dark)
+    // and slate-400 (light) read as real borders in both themes.
     let stroke_color = if is_dark {
-        BORDER_DARK
+        Color32::from_rgb(100, 116, 139)
     } else {
-        Color32::from_rgb(203, 213, 225)
+        Color32::from_rgb(148, 163, 184)
+    };
+    let shadow_color = if is_dark {
+        Color32::from_rgba_premultiplied(0, 0, 0, 110)
+    } else {
+        Color32::from_rgba_premultiplied(15, 23, 42, 45)
     };
 
     egui::Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, stroke_color))
+        .stroke(Stroke::new(1.5, stroke_color))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(12))
+        .outer_margin(Margin::same(2))
+        .shadow(egui::Shadow {
+            offset: [0, 2],
+            blur: 10,
+            spread: 0,
+            color: shadow_color,
+        })
         .show(ui, add_contents);
 }
 
 pub fn card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     card_frame(ui, |ui| {
-        ui.label(
-            RichText::new(title)
-                .size(13.0)
-                .strong()
-                .color(Color32::from_rgb(203, 213, 225)),
-        );
+        let title_color = ink(ui);
+        ui.label(RichText::new(title).size(13.0).strong().color(title_color));
         ui.add_space(4.0);
         add_contents(ui);
     });
 }
 
-pub fn kpi_card(ui: &mut egui::Ui, label: &str, value: &str, sub: &str, accent: Color32) {
+pub fn kpi_card(ui: &mut egui::Ui, label: &str, value: &str, sub_text: &str, accent: Color32) {
     card_frame(ui, |ui| {
         ui.set_min_width(140.0);
         ui.label(RichText::new(label).size(11.0).strong().color(accent));
         ui.add_space(2.0);
-        ui.label(
-            RichText::new(value)
-                .size(22.0)
-                .strong()
-                .color(Color32::WHITE),
-        );
+        let value_color = ink(ui);
+        ui.label(RichText::new(value).size(22.0).strong().color(value_color));
         ui.add_space(2.0);
-        ui.label(RichText::new(sub).size(10.0).color(SLATE_FAINT));
+        let sub_color = faint(ui);
+        ui.label(RichText::new(sub_text).size(10.0).color(sub_color));
     });
 }
 
@@ -363,27 +441,41 @@ fn render_poster_image(
                 .corner_radius(CornerRadius::same(6)),
         );
     } else {
+        let is_dark = ui.visuals().dark_mode;
+        let fill = if is_dark {
+            Color32::from_rgb(18, 25, 38)
+        } else {
+            Color32::from_rgb(226, 232, 240)
+        };
+        let fill_deep = if is_dark {
+            Color32::from_rgb(33, 46, 68)
+        } else {
+            Color32::from_rgb(203, 213, 225)
+        };
+        let edge = if is_dark {
+            BORDER_DARK
+        } else {
+            Color32::from_rgb(148, 163, 184)
+        };
+        let accent = amber(ui);
+        let text_color = if is_dark { SLATE_FAINT } else { FAINT_LIGHT };
         let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 25, 38));
+        p.rect_filled(rect, CornerRadius::same(6), fill);
         p.rect_stroke(
             rect,
             CornerRadius::same(6),
-            Stroke::new(1.0, BORDER_DARK),
+            Stroke::new(1.5, edge),
             StrokeKind::Inside,
         );
 
         let c = rect.center();
         let icon_rect = Rect::from_center_size(Pos2::new(c.x, c.y - 12.0), Vec2::new(32.0, 24.0));
-        p.rect_filled(
-            icon_rect,
-            CornerRadius::same(3),
-            Color32::from_rgb(33, 46, 68),
-        );
+        p.rect_filled(icon_rect, CornerRadius::same(3), fill_deep);
         p.rect_stroke(
             icon_rect,
             CornerRadius::same(3),
-            Stroke::new(1.0, AMBER),
+            Stroke::new(1.0, accent),
             StrokeKind::Inside,
         );
         p.line_segment(
@@ -391,27 +483,22 @@ fn render_poster_image(
                 Pos2::new(icon_rect.min.x + 8.0, icon_rect.min.y),
                 Pos2::new(icon_rect.min.x + 14.0, icon_rect.min.y + 8.0),
             ],
-            Stroke::new(1.5, AMBER),
+            Stroke::new(1.5, accent),
         );
         p.line_segment(
             [
                 Pos2::new(icon_rect.min.x + 18.0, icon_rect.min.y),
                 Pos2::new(icon_rect.min.x + 24.0, icon_rect.min.y + 8.0),
             ],
-            Stroke::new(1.5, AMBER),
+            Stroke::new(1.5, accent),
         );
 
-        let short = if fallback_title.len() > 14 {
-            &fallback_title[..14]
-        } else {
-            fallback_title
-        };
         p.text(
             Pos2::new(c.x, c.y + 16.0),
             egui::Align2::CENTER_CENTER,
-            short,
+            trunc(fallback_title, 14),
             egui::FontId::proportional(10.5),
-            SLATE_FAINT,
+            text_color,
         );
     }
 }
@@ -451,11 +538,23 @@ fn movie_card(
         Color32::from_rgb(203, 213, 225)
     };
 
+    let shadow_color = if is_dark {
+        Color32::from_rgba_premultiplied(0, 0, 0, 110)
+    } else {
+        Color32::from_rgba_premultiplied(15, 23, 42, 45)
+    };
     let frame = egui::Frame::NONE
         .fill(bg)
-        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, border))
+        .stroke(Stroke::new(if selected { 2.0 } else { 1.5 }, border))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(6));
+        .inner_margin(Margin::same(6))
+        .outer_margin(Margin::same(2))
+        .shadow(egui::Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: shadow_color,
+        });
 
     let mut action = CardAction::None;
     frame.show(ui, |ui| {
@@ -476,31 +575,40 @@ fn movie_card(
                 Color32::WHITE,
             );
         } else {
+            let ph_fill = if is_dark {
+                Color32::from_rgb(18, 25, 38)
+            } else {
+                Color32::from_rgb(226, 232, 240)
+            };
+            let ph_deep = if is_dark {
+                Color32::from_rgb(33, 46, 68)
+            } else {
+                Color32::from_rgb(203, 213, 225)
+            };
+            let ph_edge = if is_dark {
+                BORDER_DARK
+            } else {
+                Color32::from_rgb(148, 163, 184)
+            };
+            let ph_accent = amber(ui);
+            let ph_text = if is_dark { SLATE_FAINT } else { FAINT_LIGHT };
             let p = ui.painter_at(resp.rect);
-            p.rect_filled(
-                resp.rect,
-                CornerRadius::same(6),
-                Color32::from_rgb(18, 25, 38),
-            );
+            p.rect_filled(resp.rect, CornerRadius::same(6), ph_fill);
             p.rect_stroke(
                 resp.rect,
                 CornerRadius::same(6),
-                Stroke::new(1.0, BORDER_DARK),
+                Stroke::new(1.5, ph_edge),
                 StrokeKind::Inside,
             );
 
             let c = resp.rect.center();
             let icon_rect =
                 Rect::from_center_size(Pos2::new(c.x, c.y - 12.0), Vec2::new(32.0, 24.0));
-            p.rect_filled(
-                icon_rect,
-                CornerRadius::same(3),
-                Color32::from_rgb(33, 46, 68),
-            );
+            p.rect_filled(icon_rect, CornerRadius::same(3), ph_deep);
             p.rect_stroke(
                 icon_rect,
                 CornerRadius::same(3),
-                Stroke::new(1.0, AMBER),
+                Stroke::new(1.0, ph_accent),
                 StrokeKind::Inside,
             );
             p.line_segment(
@@ -508,27 +616,22 @@ fn movie_card(
                     Pos2::new(icon_rect.min.x + 8.0, icon_rect.min.y),
                     Pos2::new(icon_rect.min.x + 14.0, icon_rect.min.y + 8.0),
                 ],
-                Stroke::new(1.5, AMBER),
+                Stroke::new(1.5, ph_accent),
             );
             p.line_segment(
                 [
                     Pos2::new(icon_rect.min.x + 18.0, icon_rect.min.y),
                     Pos2::new(icon_rect.min.x + 24.0, icon_rect.min.y + 8.0),
                 ],
-                Stroke::new(1.5, AMBER),
+                Stroke::new(1.5, ph_accent),
             );
 
-            let short = if title.len() > 14 {
-                &title[..14]
-            } else {
-                title
-            };
             p.text(
                 Pos2::new(c.x, c.y + 16.0),
                 egui::Align2::CENTER_CENTER,
-                short,
+                trunc(title, 14),
                 egui::FontId::proportional(10.0),
-                SLATE_FAINT,
+                ph_text,
             );
         }
 
@@ -556,14 +659,10 @@ fn movie_card(
         }
 
         ui.add_space(4.0);
+        let title_color = ink(ui);
         let title_resp = ui.add(
-            egui::Label::new(
-                RichText::new(title)
-                    .size(12.0)
-                    .strong()
-                    .color(Color32::WHITE),
-            )
-            .truncate(),
+            egui::Label::new(RichText::new(title).size(12.0).strong().color(title_color))
+                .truncate(),
         );
         if title_resp.double_clicked() {
             action = CardAction::DoubleClicked;
@@ -572,7 +671,8 @@ fn movie_card(
         }
         if let Some(y) = year {
             if !y.is_empty() {
-                ui.label(RichText::new(y).size(10.5).color(SLATE_MUTED));
+                let year_color = sub(ui);
+                ui.label(RichText::new(y).size(10.5).color(year_color));
             }
         }
     });
@@ -610,6 +710,7 @@ impl PlexApp {
             semantic_results_val: Value::Null,
             rag_status_val: Value::Null,
             canon_val: Value::Null,
+            canon_source: "oscars".to_string(),
             taste_val: Value::Null,
             enrich_val: Value::Null,
             repair_val: Value::Null,
@@ -738,15 +839,23 @@ impl PlexApp {
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        // 1. Check for physical media file path (Plex Media -> Part -> file)
+        // 1. Check for physical media file path (Media -> Part -> file;
+        // serde emits lowercase, raw Plex JSON uses PascalCase - try both).
         let local_file = item
             .get("file")
             .and_then(Value::as_str)
             .map(ToString::to_string)
             .or_else(|| {
-                let media = item.get("Media")?.as_array()?;
+                let media = item
+                    .get("media")
+                    .or_else(|| item.get("Media"))?
+                    .as_array()?;
                 for m in media {
-                    if let Some(parts) = m.get("Part").and_then(Value::as_array) {
+                    if let Some(parts) = m
+                        .get("part")
+                        .or_else(|| m.get("Part"))
+                        .and_then(Value::as_array)
+                    {
                         for p in parts {
                             if let Some(f) = p.get("file").and_then(Value::as_str) {
                                 return Some(f.to_string());
@@ -1045,16 +1154,11 @@ impl PlexApp {
 
             if self.sidebar_open {
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new("PlexMCP")
-                            .size(15.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
+                    ui.label(RichText::new("PlexMCP").size(15.0).strong().color(ink(ui)));
                     ui.label(
                         RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                             .size(10.0)
-                            .color(SLATE_FAINT),
+                            .color(faint(ui)),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1079,7 +1183,7 @@ impl PlexApp {
                 } else {
                     "Backend up · Plex down"
                 };
-                ui.label(RichText::new(text).size(11.0).color(SLATE_MUTED));
+                ui.label(RichText::new(text).size(11.0).color(sub(ui)));
             });
             ui.add_space(8.0);
         }
@@ -1117,11 +1221,7 @@ impl PlexApp {
                 } else {
                     Color32::TRANSPARENT
                 };
-                let fg = if active {
-                    AMBER
-                } else {
-                    Color32::from_rgb(203, 213, 225)
-                };
+                let fg = if active { amber(ui) } else { sub(ui) };
 
                 let text = if self.sidebar_open {
                     item.label()
@@ -1213,13 +1313,13 @@ impl PlexApp {
 
     // 1. Overview
     fn view_overview(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Overview").color(Color32::WHITE).size(22.0));
+        ui.heading(RichText::new("Overview").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Plex Media Server health, telemetry, active sessions, and recently added items.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -1246,10 +1346,10 @@ impl PlexApp {
                     RichText::new(server_name)
                         .size(16.0)
                         .strong()
-                        .color(Color32::WHITE),
+                        .color(ink(ui)),
                 );
-                ui.label(RichText::new(format!("v{}", server_ver)).color(AMBER));
-                ui.label(RichText::new(format!("· Platform: {}", platform)).color(SLATE_MUTED));
+                ui.label(RichText::new(format!("v{}", server_ver)).color(amber(ui)));
+                ui.label(RichText::new(format!("· Platform: {}", platform)).color(sub(ui)));
                 let status_text = if self.plex_ok {
                     "[Connected]"
                 } else {
@@ -1328,16 +1428,12 @@ impl PlexApp {
             .unwrap_or_default();
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
-                ui.heading(
-                    RichText::new("Active Streams")
-                        .size(16.0)
-                        .color(Color32::WHITE),
-                );
+                ui.heading(RichText::new("Active Streams").size(16.0).color(ink(ui)));
                 ui.add_space(4.0);
                 if sessions_arr.is_empty() {
                     ui.label(
                         RichText::new("No active playback sessions on this server.")
-                            .color(SLATE_FAINT),
+                            .color(faint(ui)),
                     );
                 } else {
                     for session in &sessions_arr {
@@ -1357,22 +1453,16 @@ impl PlexApp {
                             ui.label(
                                 RichText::new(format!("· {} ({})", title, user))
                                     .strong()
-                                    .color(Color32::WHITE),
+                                    .color(ink(ui)),
                             );
-                            ui.label(
-                                RichText::new(format!("Player: {}", player)).color(SLATE_MUTED),
-                            );
+                            ui.label(RichText::new(format!("Player: {}", player)).color(sub(ui)));
                         });
                     }
                 }
             });
 
             cols[1].group(|ui| {
-                ui.heading(
-                    RichText::new("Quick Operations")
-                        .size(16.0)
-                        .color(Color32::WHITE),
-                );
+                ui.heading(RichText::new("Quick Operations").size(16.0).color(ink(ui)));
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Refresh All Telemetry").clicked() {
@@ -1420,7 +1510,7 @@ impl PlexApp {
 
         card(ui, "Recently Added Media (Posters)", |ui| {
             if recent_items.is_empty() {
-                ui.label(RichText::new("Querying recently added media...").color(SLATE_FAINT));
+                ui.label(RichText::new("Querying recently added media...").color(faint(ui)));
             } else {
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1479,7 +1569,7 @@ impl PlexApp {
     fn view_inbox(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Inbox & Processing Queue")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -1487,7 +1577,7 @@ impl PlexApp {
             RichText::new(
                 "Pending media ingest, unmatched file alerts, and processing notifications.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -1509,8 +1599,7 @@ impl PlexApp {
                         .unwrap_or("pending");
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!("· {}: status={}", title, status))
-                                .color(Color32::WHITE),
+                            RichText::new(format!("· {}: status={}", title, status)).color(ink(ui)),
                         );
                     });
                 }
@@ -1520,11 +1609,11 @@ impl PlexApp {
 
     // 3. Libraries
     fn view_libraries(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Libraries").color(Color32::WHITE).size(22.0));
+        ui.heading(RichText::new("Libraries").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new("Manage configured media libraries (Movies, Shows, Music, Photos).")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -1536,8 +1625,7 @@ impl PlexApp {
             .unwrap_or_default();
         if sections.is_empty() {
             ui.label(
-                RichText::new("No libraries loaded. Click refresh to query Plex.")
-                    .color(SLATE_FAINT),
+                RichText::new("No libraries loaded. Click refresh to query Plex.").color(faint(ui)),
             );
         } else {
             let mut browse_target = None;
@@ -1558,8 +1646,8 @@ impl PlexApp {
 
                 card(ui, &format!("Library: {} (Key: {})", title, key), |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("Type: {}", kind)).color(AMBER));
-                        ui.label(RichText::new(format!("· Agent: {}", agent)).color(SLATE_MUTED));
+                        ui.label(RichText::new(format!("Type: {}", kind)).color(amber(ui)));
+                        ui.label(RichText::new(format!("· Agent: {}", agent)).color(sub(ui)));
                         if ui.button("Browse Items").clicked() {
                             browse_target = Some(key.to_string());
                         }
@@ -1595,7 +1683,7 @@ impl PlexApp {
     fn view_movies(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Movies & Media Inspector")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -1603,7 +1691,7 @@ impl PlexApp {
             RichText::new(
                 "Browse media collection with poster cards, metadata, and stream telemetry.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(10.0);
 
@@ -1713,14 +1801,14 @@ impl PlexApp {
                     ui.heading(
                         RichText::new("Collection Items")
                             .size(15.0)
-                            .color(Color32::WHITE),
+                            .color(ink(ui)),
                     );
-                    ui.label(RichText::new(format!("({} titles)", filtered_items.len())).color(SLATE_FAINT));
+                    ui.label(RichText::new(format!("({} titles)", filtered_items.len())).color(faint(ui)));
                 });
                 ui.add_space(6.0);
 
                 if filtered_items.is_empty() {
-                    ui.label(RichText::new("No items found. Click 'Load Section Items' to browse.").color(SLATE_FAINT));
+                    ui.label(RichText::new("No items found. Click 'Load Section Items' to browse.").color(faint(ui)));
                 } else if self.movies_view_grid {
                     egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
@@ -1780,20 +1868,45 @@ impl PlexApp {
                                 .and_then(|p| self.poster_cache.get(p))
                                 .and_then(|opt| opt.as_ref());
 
-                            let bg = if selected { AMBER_GLOW } else { CARD_DARK };
+                            let is_dark = ui.visuals().dark_mode;
+                            let bg = if selected {
+                                AMBER_GLOW
+                            } else if is_dark {
+                                CARD_DARK
+                            } else {
+                                Color32::WHITE
+                            };
+                            let edge = if selected {
+                                amber(ui)
+                            } else if is_dark {
+                                BORDER_DARK
+                            } else {
+                                Color32::from_rgb(148, 163, 184)
+                            };
                             egui::Frame::NONE
                                 .fill(bg)
-                                .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { AMBER } else { BORDER_DARK }))
+                                .stroke(Stroke::new(if selected { 2.0 } else { 1.5 }, edge))
                                 .corner_radius(CornerRadius::same(6))
                                 .inner_margin(Margin::same(6))
+                                .outer_margin(Margin::same(2))
+                                .shadow(egui::Shadow {
+                                    offset: [0, 1],
+                                    blur: 6,
+                                    spread: 0,
+                                    color: if is_dark {
+                                        Color32::from_rgba_premultiplied(0, 0, 0, 90)
+                                    } else {
+                                        Color32::from_rgba_premultiplied(15, 23, 42, 35)
+                                    },
+                                })
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         render_poster_image(ui, tex, Vec2::new(40.0, 60.0), title);
                                         let title_col = ui.vertical(|ui| {
-                                            ui.label(RichText::new(format!("{} ({})", title, year)).strong().color(Color32::WHITE));
+                                            ui.label(RichText::new(format!("{} ({})", title, year)).strong().color(ink(ui)));
                                             if !summary.is_empty() {
-                                                let blurb = if summary.len() > 100 { format!("{}…", &summary[..100]) } else { summary.to_string() };
-                                                ui.label(RichText::new(blurb).size(11.0).color(SLATE_MUTED));
+                                                let blurb = format!("{}…", trunc(summary, 100));
+                                                ui.label(RichText::new(blurb).size(11.0).color(sub(ui)));
                                             }
                                         });
                                         if title_col.response.double_clicked() {
@@ -1822,52 +1935,61 @@ impl PlexApp {
                 ui.heading(
                     RichText::new("Media Item Inspector")
                         .size(15.0)
-                        .color(Color32::WHITE),
+                        .color(ink(ui)),
                 );
                 ui.add_space(6.0);
                 if !self.media_detail_val.is_null() {
-                    let title = self
+                    // Dispatch wraps the Plex item as {"item": {...}}; fall
+                    // back to top-level for hand-built payloads.
+                    let detail = self
                         .media_detail_val
+                        .get("item")
+                        .unwrap_or(&self.media_detail_val);
+                    let title = detail
                         .get("title")
                         .and_then(Value::as_str)
                         .unwrap_or("Item Detail");
-                    let summary = self
-                        .media_detail_val
+                    let summary = detail
                         .get("summary")
                         .and_then(Value::as_str)
                         .unwrap_or("No summary provided.");
-                    let year = self
-                        .media_detail_val
+                    let year = detail
                         .get("year")
                         .and_then(Value::as_i64)
-                        .map(|y| format!("{}", y))
+                        .map(|y| format!("{y}"))
                         .unwrap_or_default();
-                    let duration = self
-                        .media_detail_val
-                        .get("duration_ms")
-                        .and_then(Value::as_u64)
-                        .map(|ms| ms / 60000)
-                        .unwrap_or(0);
-                    let resolution = self
-                        .media_detail_val
-                        .get("video_resolution")
+                    // Plex reports duration in ms under "duration"; the first
+                    // Media/Part carries stream + file detail.
+                    let duration_ms = detail
+                        .get("duration")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let duration = duration_ms / 60000;
+                    let stream = detail
+                        .get("Media")
+                        .and_then(Value::as_array)
+                        .and_then(|arr| arr.first());
+                    let resolution = stream
+                        .and_then(|m| m.get("videoResolution"))
                         .and_then(Value::as_str)
-                        .unwrap_or("1080p");
-                    let codec = self
-                        .media_detail_val
-                        .get("video_codec")
+                        .unwrap_or("unknown");
+                    let codec = stream
+                        .and_then(|m| m.get("videoCodec"))
                         .and_then(Value::as_str)
-                        .unwrap_or("h264");
-                    let audio = self
-                        .media_detail_val
-                        .get("audio_codec")
+                        .unwrap_or("unknown");
+                    let audio = stream
+                        .and_then(|m| m.get("audioCodec"))
                         .and_then(Value::as_str)
-                        .unwrap_or("eac3");
+                        .unwrap_or("unknown");
+                    let container = stream
+                        .and_then(|m| m.get("container"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
 
-                    let detail_thumb = self
-                        .media_detail_val
+                    let detail_thumb = detail
                         .get("thumb")
-                        .or_else(|| self.media_detail_val.get("art"))
+                        .or_else(|| detail.get("art"))
                         .and_then(Value::as_str);
 
                     let detail_tex = detail_thumb
@@ -1882,27 +2004,48 @@ impl PlexApp {
                                 RichText::new(title)
                                     .strong()
                                     .size(17.0)
-                                    .color(Color32::WHITE),
+                                    .color(ink(ui)),
                             );
                             if !year.is_empty() {
-                                ui.label(RichText::new(format!("Year: {}", year)).color(SLATE_MUTED));
+                                ui.label(RichText::new(format!("Year: {}", year)).color(sub(ui)));
                             }
                             if duration > 0 {
-                                ui.label(RichText::new(format!("Runtime: {} min", duration)).color(SLATE_MUTED));
+                                ui.label(RichText::new(format!("Runtime: {} min", duration)).color(sub(ui)));
                             }
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
-                                let badge_fill = Color32::from_rgb(33, 46, 68);
-                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
-                                    ui.label(RichText::new(resolution).strong().color(AMBER));
-                                });
-                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
-                                    ui.label(RichText::new(codec).strong().color(SKY));
-                                });
-                                egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
-                                    ui.label(RichText::new(audio).strong().color(EMERALD));
-                                });
+                                let badge_fill = if ui.visuals().dark_mode {
+                                    Color32::from_rgb(33, 46, 68)
+                                } else {
+                                    Color32::from_rgb(226, 232, 240)
+                                };
+                                for (text, accent) in [
+                                    (resolution, amber(ui)),
+                                    (codec, SKY),
+                                    (audio, EMERALD),
+                                ] {
+                                    egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                        ui.label(RichText::new(text).strong().color(accent));
+                                    });
+                                }
+                                if !container.is_empty() {
+                                    egui::Frame::NONE.fill(badge_fill).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                        ui.label(RichText::new(container).strong().color(sub(ui)));
+                                    });
+                                }
                             });
+                            if let Some(kind) = detail.get("type").and_then(Value::as_str) {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Type: {kind} · Key: {}",
+                                        detail
+                                            .get("ratingKey")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("?"),
+                                    ))
+                                    .color(sub(ui)),
+                                );
+                            }
                         });
                     });
 
@@ -1910,9 +2053,9 @@ impl PlexApp {
                     ui.separator();
                     ui.add_space(6.0);
 
-                    ui.label(RichText::new("Plot Synopsis:").strong().color(Color32::WHITE));
+                    ui.label(RichText::new("Plot Synopsis:").strong().color(ink(ui)));
                     ui.add_space(2.0);
-                    ui.label(RichText::new(summary).color(SLATE_MUTED));
+                    ui.label(RichText::new(summary).color(sub(ui)));
                     ui.add_space(10.0);
 
                     ui.horizontal(|ui| {
@@ -1936,7 +2079,7 @@ impl PlexApp {
                 } else {
                     ui.label(
                         RichText::new("Select a movie from the grid on the left to view poster art, stream specifications, and metadata.")
-                            .color(SLATE_FAINT),
+                            .color(faint(ui)),
                     );
                 }
             });
@@ -1962,7 +2105,7 @@ impl PlexApp {
     fn view_repair(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Media Repair & Diagnostics")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -1970,7 +2113,7 @@ impl PlexApp {
             RichText::new(
                 "Identify missing subtitles, corrupt files, broken streams, and unmatched items.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2022,17 +2165,13 @@ impl PlexApp {
 
     // 6. Search with Poster Thumbnails
     fn view_search(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("Universal Search")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("Universal Search").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Search across all movies, television shows, episodes, and music tracks.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2077,7 +2216,7 @@ impl PlexApp {
 
         card(ui, "Search Results", |ui| {
             if results.is_empty() {
-                ui.label(RichText::new("Enter a search term and press Search.").color(SLATE_FAINT));
+                ui.label(RichText::new("Enter a search term and press Search.").color(faint(ui)));
             } else {
                 for r in &results {
                     let title = r.get("title").and_then(Value::as_str).unwrap_or("Title");
@@ -2093,7 +2232,7 @@ impl PlexApp {
 
                     let row = ui.horizontal(|ui| {
                         render_poster_image(ui, tex, Vec2::new(36.0, 54.0), title);
-                        ui.label(RichText::new(title).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(title).strong().color(ink(ui)));
                         ui.label(RichText::new(format!("[{}]", kind)).size(11.0).color(SKY));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Inspect").clicked() {
@@ -2135,17 +2274,13 @@ impl PlexApp {
 
     // 7. Semantic Search
     fn view_semantic_search(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("Semantic Search")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("Semantic Search").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Natural language similarity search over media plot summaries and synopsis vectors.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2180,7 +2315,7 @@ impl PlexApp {
                     RichText::new(
                         "Enter a descriptive query like 'intense 80s sci-fi thrillers with cyborgs'",
                     )
-                    .color(SLATE_FAINT),
+                    .color(faint(ui)),
                 );
             } else {
                 for m in &matches {
@@ -2188,11 +2323,11 @@ impl PlexApp {
                     let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
                     let synopsis = m.get("synopsis").and_then(Value::as_str).unwrap_or("");
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(title).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(title).strong().color(ink(ui)));
                         ui.label(RichText::new(format!("Similarity: {:.2}", score)).color(EMERALD));
                     });
                     if !synopsis.is_empty() {
-                        ui.label(RichText::new(synopsis).color(SLATE_MUTED));
+                        ui.label(RichText::new(synopsis).color(sub(ui)));
                     }
                     ui.separator();
                 }
@@ -2202,17 +2337,13 @@ impl PlexApp {
 
     // 8. RAG Management
     fn view_rag(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("RAG Management")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("RAG Management").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Vector database status, media synopsis embeddings, and vector depot health.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2251,48 +2382,163 @@ impl PlexApp {
         });
     }
 
-    // 9. Canon Coverage
+    // 9. Canon Coverage (mirrors webapp canon tabs: Oscars / AFI 100 /
+    // TMDB Top / custom list; live per-source list comparison is a core
+    // follow-up - buttons switch source context and re-run the report).
     fn view_canon(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("Canon Coverage")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("Canon Coverage").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Check completeness against IMDB Top 250, AFI 100, and curated canons.")
-                .color(SLATE_MUTED),
+            RichText::new(
+                "Check completeness against Oscar winners, AFI 100, TMDB Top, and custom lists.",
+            )
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
-        let canons = self
+        let sources = [
+            ("oscars", "Oscar Winners", "Every Best Picture winner"),
+            ("afi", "AFI 100", "AFI 2007 top-100"),
+            ("tmdb", "TMDB Top", "Top-rated by TMDB voters"),
+            ("custom", "Custom List", "Your own canon slice"),
+        ];
+        let mut picked: Option<String> = None;
+        card(ui, "Canon Sources", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (id, label, hint) in sources {
+                    let active = self.canon_source == id;
+                    let btn = egui::Button::new(RichText::new(label).strong().color(if active {
+                        amber(ui)
+                    } else {
+                        ink(ui)
+                    }))
+                    .fill(if active {
+                        AMBER_GLOW
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .stroke(Stroke::new(
+                        if active { 1.5 } else { 1.0 },
+                        if active {
+                            amber(ui)
+                        } else if ui.visuals().dark_mode {
+                            BORDER_DARK
+                        } else {
+                            Color32::from_rgb(148, 163, 184)
+                        },
+                    ))
+                    .corner_radius(CornerRadius::same(6));
+                    if ui
+                        .add_sized([150.0, 44.0], btn)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        picked = Some(id.to_string());
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Per-source live list comparison (Wikipedia / TMDB holdings check) lands with the core canon ops follow-up.",
+                )
+                .size(11.0)
+                .color(faint(ui)),
+            );
+        });
+
+        if let Some(id) = picked {
+            self.canon_source = id.clone();
+            self.status_line = format!("Canon source: {id}");
+            let tx = self.tx.clone();
+            let config = self.get_plex_config();
+            self.spawn(async move {
+                if let Ok(v) = dispatch(&config, Command::CanonCoverage { library: None }).await {
+                    let _ = tx.send(Job::CanonReport(v));
+                }
+            });
+        }
+
+        ui.add_space(10.0);
+
+        let coverage = self
             .canon_val
-            .get("canons")
+            .get("coverage_pct")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let gaps = self
+            .canon_val
+            .get("canon_gaps")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        card(ui, "Canon Lists & Franchises", |ui| {
-            if canons.is_empty() {
-                ui.label(RichText::new("Loading canon coverage report...").color(SLATE_FAINT));
-            } else {
-                for list in &canons {
-                    let name = list.get("name").and_then(Value::as_str).unwrap_or("Canon");
-                    let total = list.get("total").and_then(Value::as_u64).unwrap_or(100);
-                    let owned = list.get("owned").and_then(Value::as_u64).unwrap_or(0);
-                    let pct = if total > 0 {
-                        (owned as f32 / total as f32) * 100.0
-                    } else {
-                        0.0
-                    };
+        let sections = self.canon_val.get("total_sections").and_then(Value::as_u64);
 
-                    ui.label(RichText::new(name).strong().color(Color32::WHITE));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("Owned: {} / {} ({:.1}%)", owned, total, pct))
-                                .color(AMBER),
+        card(ui, "Coverage Report", |ui| {
+            if self.canon_val.is_null() {
+                ui.label(RichText::new("Loading canon coverage report...").color(faint(ui)));
+            } else {
+                ui.horizontal(|ui| {
+                    kpi_card(
+                        ui,
+                        "Coverage",
+                        &format!("{coverage:.1}%"),
+                        "Canon titles held",
+                        EMERALD,
+                    );
+                    if let Some(total) = sections {
+                        kpi_card(
+                            ui,
+                            "Sections",
+                            &format!("{total}"),
+                            "Libraries scanned",
+                            SKY,
                         );
-                    });
-                    ui.add_space(4.0);
+                    }
+                    kpi_card(
+                        ui,
+                        "Gaps",
+                        &format!("{}", gaps.len()),
+                        "Franchises incomplete",
+                        AMBER,
+                    );
+                });
+            }
+        });
+
+        ui.add_space(10.0);
+
+        card(ui, "Missing Titles by Franchise", |ui| {
+            if gaps.is_empty() {
+                ui.label(
+                    RichText::new("No gaps reported - run a source above to refresh.")
+                        .color(faint(ui)),
+                );
+            } else {
+                for gap in &gaps {
+                    let franchise = gap
+                        .get("franchise")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Franchise");
+                    ui.label(RichText::new(franchise).strong().color(ink(ui)));
+                    let missing = gap
+                        .get("missing")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    for title in &missing {
+                        let name = title
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or(title.as_str().unwrap_or("Unknown title"));
+                        let year = title
+                            .get("year")
+                            .and_then(Value::as_i64)
+                            .map(|y| format!(" ({y})"))
+                            .unwrap_or_default();
+                        ui.label(RichText::new(format!("· {name}{year}")).color(sub(ui)));
+                    }
+                    ui.add_space(6.0);
                 }
             }
         });
@@ -2302,7 +2548,7 @@ impl PlexApp {
     fn view_enrichment(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Metadata Enrichment")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -2310,7 +2556,7 @@ impl PlexApp {
             RichText::new(
                 "Enhance media items with posters, subtitles, chapter markers, and ratings.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2334,16 +2580,12 @@ impl PlexApp {
 
             ui.add_space(10.0);
             if !self.enrich_val.is_null() {
-                ui.label(
-                    RichText::new("Enrichment Result:")
-                        .strong()
-                        .color(Color32::WHITE),
-                );
+                ui.label(RichText::new("Enrichment Result:").strong().color(ink(ui)));
                 ui.label(
                     RichText::new(
                         serde_json::to_string_pretty(&self.enrich_val).unwrap_or_default(),
                     )
-                    .color(SLATE_MUTED),
+                    .color(sub(ui)),
                 );
             }
         });
@@ -2353,13 +2595,13 @@ impl PlexApp {
     fn view_taste(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Taste & Viewing Analytics")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
         ui.label(
             RichText::new("User watch habits, top genres, directors, and AI recommendations.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2372,7 +2614,7 @@ impl PlexApp {
         card(ui, "Top Genres & Directors", |ui| {
             if genres.is_empty() {
                 ui.label(
-                    RichText::new("Taste profile analyzing watch history...").color(SLATE_FAINT),
+                    RichText::new("Taste profile analyzing watch history...").color(faint(ui)),
                 );
             } else {
                 for g in &genres {
@@ -2381,7 +2623,7 @@ impl PlexApp {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("· {}: {} titles watched", genre, count))
-                                .color(Color32::WHITE),
+                                .color(ink(ui)),
                         );
                     });
                 }
@@ -2391,15 +2633,11 @@ impl PlexApp {
 
     // 12. Chat
     fn view_chat(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("Assistant Chat")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("Assistant Chat").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new("Interactive LLM media assistant with full Plex library context.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2427,31 +2665,43 @@ impl PlexApp {
             .max_height(400.0)
             .show(ui, |ui| {
                 for (sender, msg) in &self.chat_history {
+                    let is_dark = ui.visuals().dark_mode;
                     let is_user = sender == "User";
-                    let bg = if is_user {
-                        Color32::from_rgb(26, 36, 54)
+                    let bg = if is_dark {
+                        if is_user {
+                            Color32::from_rgb(26, 36, 54)
+                        } else {
+                            Color32::from_rgb(33, 46, 68)
+                        }
+                    } else if is_user {
+                        Color32::from_rgb(226, 232, 240)
                     } else {
-                        Color32::from_rgb(33, 46, 68)
+                        Color32::WHITE
                     };
                     let border = if is_user {
-                        Color32::from_rgb(51, 65, 85)
+                        if is_dark {
+                            Color32::from_rgb(51, 65, 85)
+                        } else {
+                            Color32::from_rgb(148, 163, 184)
+                        }
                     } else {
-                        AMBER
+                        amber(ui)
                     };
 
                     egui::Frame::NONE
                         .fill(bg)
-                        .stroke(Stroke::new(1.0, border))
+                        .stroke(Stroke::new(1.5, border))
                         .inner_margin(Margin::same(8))
                         .corner_radius(CornerRadius::same(6))
                         .show(ui, |ui| {
                             ui.label(RichText::new(sender).strong().color(if is_user {
                                 SKY
                             } else {
-                                AMBER
+                                amber(ui)
                             }));
                             ui.add_space(2.0);
-                            ui.label(RichText::new(msg).color(Color32::WHITE));
+                            let msg_color = ink(ui);
+                            ui.label(RichText::new(msg).color(msg_color));
                         });
                     ui.add_space(6.0);
                 }
@@ -2505,15 +2755,11 @@ impl PlexApp {
 
     // 13. Tools
     fn view_tools(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("MCP Tools Catalog")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("MCP Tools Catalog").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new("Execute any of the 36 registered FastMCP server tools in-process.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2568,11 +2814,11 @@ impl PlexApp {
     fn view_skills(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Plex Skills & Automations")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
-        ui.label(RichText::new("Automated workflows for library maintenance, transcode pre-warming, and playlists.").color(SLATE_MUTED));
+        ui.label(RichText::new("Automated workflows for library maintenance, transcode pre-warming, and playlists.").color(sub(ui)));
         ui.add_space(12.0);
 
         let skills_arr = self
@@ -2587,8 +2833,8 @@ impl PlexApp {
                     let name = s.get("name").and_then(Value::as_str).unwrap_or("Skill");
                     let desc = s.get("description").and_then(Value::as_str).unwrap_or("");
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(name).strong().color(Color32::WHITE));
-                        ui.label(RichText::new(desc).color(SLATE_MUTED));
+                        ui.label(RichText::new(name).strong().color(ink(ui)));
+                        ui.label(RichText::new(desc).color(sub(ui)));
                     });
                 }
             } else {
@@ -2612,8 +2858,8 @@ impl PlexApp {
                 ];
                 for (name, desc) in default_skills {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(name).strong().color(Color32::WHITE));
-                        ui.label(RichText::new(format!("- {}", desc)).color(SLATE_MUTED));
+                        ui.label(RichText::new(name).strong().color(ink(ui)));
+                        ui.label(RichText::new(format!("- {}", desc)).color(sub(ui)));
                     });
                     ui.add_space(2.0);
                 }
@@ -2623,15 +2869,11 @@ impl PlexApp {
 
     // 15. API Docs
     fn view_api_docs(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("API Documentation")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("API Documentation").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new("Interactive API reference for Plex REST endpoints and FastMCP tools.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2668,8 +2910,8 @@ impl PlexApp {
             ];
             for (ep, desc) in endpoints {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(ep).strong().color(AMBER));
-                    ui.label(RichText::new(format!("· {}", desc)).color(SLATE_MUTED));
+                    ui.label(RichText::new(ep).strong().color(amber(ui)));
+                    ui.label(RichText::new(format!("· {}", desc)).color(sub(ui)));
                 });
                 ui.add_space(2.0);
             }
@@ -2678,17 +2920,13 @@ impl PlexApp {
 
     // 16. Server
     fn view_server(&mut self, ui: &mut egui::Ui) {
-        ui.heading(
-            RichText::new("Server Telemetry")
-                .color(Color32::WHITE)
-                .size(22.0),
-        );
+        ui.heading(RichText::new("Server Telemetry").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Plex Media Server system specifications, platform version, and network ports.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2709,17 +2947,14 @@ impl PlexApp {
                 .and_then(Value::as_str)
                 .unwrap_or("plex-machine-01");
 
-            ui.label(RichText::new(format!("· Server Version: {}", ver)).color(Color32::WHITE));
-            ui.label(RichText::new(format!("· Platform OS: {}", platform)).color(Color32::WHITE));
-            ui.label(
-                RichText::new(format!("· Machine Identifier: {}", machine_id))
-                    .color(Color32::WHITE),
-            );
+            ui.label(RichText::new(format!("· Server Version: {}", ver)).color(ink(ui)));
+            ui.label(RichText::new(format!("· Platform OS: {}", platform)).color(ink(ui)));
+            ui.label(RichText::new(format!("· Machine Identifier: {}", machine_id)).color(ink(ui)));
             ui.label(
                 RichText::new("· Transcoder Hardware Acceleration: Intel QuickSync / NVIDIA NVENC")
-                    .color(Color32::WHITE),
+                    .color(ink(ui)),
             );
-            ui.label(RichText::new("· Local Port: :32400 (HTTP / HTTPS)").color(Color32::WHITE));
+            ui.label(RichText::new("· Local Port: :32400 (HTTP / HTTPS)").color(ink(ui)));
         });
     }
 
@@ -2727,13 +2962,13 @@ impl PlexApp {
     fn view_logs(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("System Logs & Events")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
         ui.label(
             RichText::new("Real-time event stream from plex-core in-process dispatcher.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2753,7 +2988,7 @@ impl PlexApp {
                 let filter = self.log_filter.to_lowercase();
                 for log in self.event_logs.iter().rev() {
                     if filter.is_empty() || log.to_lowercase().contains(&filter) {
-                        ui.label(RichText::new(log).color(SLATE_MUTED).size(12.0));
+                        ui.label(RichText::new(log).color(sub(ui)).size(12.0));
                     }
                 }
             });
@@ -2763,7 +2998,7 @@ impl PlexApp {
     fn view_help(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Help & Documentation")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -2771,7 +3006,7 @@ impl PlexApp {
             RichText::new(
                 "Fleet guidelines, credential setup, port mappings, and troubleshooting.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2779,22 +3014,18 @@ impl PlexApp {
             ui.label(
                 RichText::new("How to find your Plex Token:")
                     .strong()
-                    .color(Color32::WHITE),
+                    .color(ink(ui)),
             );
             ui.label(
-                RichText::new("1. Log in to your Plex Web app in any browser.").color(SLATE_MUTED),
+                RichText::new("1. Log in to your Plex Web app in any browser.").color(sub(ui)),
             );
-            ui.label(
-                RichText::new("2. Browse to any movie or television episode.").color(SLATE_MUTED),
-            );
-            ui.label(
-                RichText::new("3. Click '...' -> 'Get Info' -> 'View XML'.").color(SLATE_MUTED),
-            );
+            ui.label(RichText::new("2. Browse to any movie or television episode.").color(sub(ui)));
+            ui.label(RichText::new("3. Click '...' -> 'Get Info' -> 'View XML'.").color(sub(ui)));
             ui.label(
                 RichText::new(
                     "4. Look at the URL in the address bar: copy the value of 'X-Plex-Token'.",
                 )
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
             );
         });
 
@@ -2806,22 +3037,22 @@ impl PlexApp {
                     "Add this configuration to your Claude Desktop or Antigravity config:",
                 )
                 .strong()
-                .color(Color32::WHITE),
+                .color(ink(ui)),
             );
             let snippet = "{\n  \"mcpServers\": {\n    \"plex\": {\n      \"command\": \"target/release/rust-plex-mcp.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}";
-            ui.label(RichText::new(snippet).color(AMBER));
+            ui.label(RichText::new(snippet).color(amber(ui)));
         });
     }
 
     // 19. Settings (with Fleet Standard LLM Settings Card)
     fn view_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Settings").color(Color32::WHITE).size(22.0));
+        ui.heading(RichText::new("Settings").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
             RichText::new(
                 "Plex server connection, LLM providers, OS Credential Vault, and appearance.",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -2975,7 +3206,7 @@ impl PlexApp {
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Test Status:").color(SLATE_MUTED));
+                ui.label(RichText::new("Test Status:").color(sub(ui)));
                 let color = match self.llm_test_success {
                     Some(true) => EMERALD,
                     Some(false) => ROSE,
@@ -3028,7 +3259,7 @@ impl PlexApp {
                 }
                 ui.label(
                     RichText::new(&self.vault_status_note)
-                        .color(SLATE_FAINT)
+                        .color(faint(ui))
                         .size(11.0),
                 );
             });
@@ -3039,7 +3270,7 @@ impl PlexApp {
     fn view_crossconnect(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Fleet Crossconnect Bridge")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
@@ -3047,7 +3278,7 @@ impl PlexApp {
             RichText::new(
                 "Dispatch TTS announcements to speech-mcp (:10909) and telemetry to aiwatcher (:10946).",
             )
-            .color(SLATE_MUTED),
+            .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -3129,13 +3360,13 @@ impl PlexApp {
     fn view_raw(&mut self, ui: &mut egui::Ui) {
         ui.heading(
             RichText::new("Raw JSON Inspector")
-                .color(Color32::WHITE)
+                .color(ink(ui))
                 .size(22.0),
         );
         ui.add_space(4.0);
         ui.label(
             RichText::new("Inspect live wire payload from the most recent command execution.")
-                .color(SLATE_MUTED),
+                .color(sub(ui)),
         );
         ui.add_space(12.0);
 
@@ -3182,24 +3413,21 @@ impl eframe::App for PlexApp {
                 {
                     self.sidebar_open = !self.sidebar_open;
                 }
-                ui.label(RichText::new("PLEX · ARTCRAFT").strong().color(AMBER));
+                ui.label(RichText::new("PLEX · ARTCRAFT").strong().color(amber(ui)));
                 ui.separator();
                 ui.label(
                     RichText::new(format!("View: {}", self.page.label()))
                         .size(12.0)
-                        .color(Color32::WHITE),
+                        .color(ink(ui)),
                 );
                 ui.separator();
                 if self.pending > 0 {
                     ui.label(
-                        RichText::new(format!("Loading… ({} pending)", self.pending)).color(AMBER),
+                        RichText::new(format!("Loading… ({} pending)", self.pending))
+                            .color(amber(ui)),
                     );
                 } else {
-                    ui.label(
-                        RichText::new(&self.status_line)
-                            .color(SLATE_MUTED)
-                            .size(12.0),
-                    );
+                    ui.label(RichText::new(&self.status_line).color(sub(ui)).size(12.0));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
