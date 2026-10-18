@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 2:3 aspect ratio responsive `movie_card` grid with hover effects and selection highlights matching the original webapp.
   - Movie cards integrated into `Movies` view (with grid/list toggle), `Overview` view (horizontal Recently Added rail), `Search` view, and the `Media Inspector` detail card.
   - Painted vector fallback clapperboard icon when posters are offline or loading.
+- **Interactive Movie Playback**:
+  - Double-clicking any movie card or collection item immediately starts playback.
+  - Translucent circular play icon badge overlay rendered on hover over poster cards matching the original webapp PlayIcon.
+  - Native media player integration (`open` crate): automatically detects physical file path on disk (`Media.Part.file`) and launches it directly in the system default media player (VLC, MPV, Windows Media Player) with zero UI thread blocking.
+  - Remote/Web fallback: if physical file is remote or unmounted, automatically opens the movie's Plex Web player URL in the default browser.
+  - Prominent `> Play Movie` button in the Media Item Inspector pane and search results rows.
 - **Full UI/UX Clone Parity**: Native `egui 0.37` desktop dashboard implementing all 19 views from the legacy Next.js webapp:
   - `Overview` (`/`): Real-time server telemetry, KPI grid, active playback streams, recently added media carousels.
   - `Inbox` (`/inbox`): Ingest queue, task statuses, unmatched file alerts.

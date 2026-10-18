@@ -25,6 +25,7 @@
    - Implemented native `egui 0.37` desktop dashboard with 100% clone parity across all 19 legacy Next.js webapp routes:
      `Overview`, `Inbox`, `Libraries`, `Movies & Media Inspector`, `Media Repair`, `Search`, `Semantic Search`, `RAG Management`, `Canon Coverage`, `Enrichment`, `Taste`, `Chat`, `Tools`, `Skills`, `API Docs`, `Server`, `Logs`, `Help`, `Settings`, plus `Crossconnect` and `Raw JSON`.
    - Rich movie poster cards (2:3 aspect ratio), grid/list views, horizontal scrolling rail in Overview, and asynchronous background texture loader.
+   - Interactive movie playback: double-clicking any movie card, list item, or search result launches local media player (VLC/MPV) or Plex Web player with hover play overlay and `> Play Movie` buttons.
    - Fleet Standard LLM Settings Card with provider selection (Ollama, LM Studio, Cloud), dynamic model elicitation, Windows Credential Manager OS Vault integration, and non-streaming test ping button with status pill.
    - 10-Point Uncrashable Binary Contract: zero panics/unwraps, async worker channel, strict glyph allowlist (`°`, `×`, `·`, `…`), safe Ctrl+Wheel zoom factor clamping.
    - Headless CI smoke test (`cargo run -p plex-app -- --smoke`) passing.
