@@ -1,23 +1,23 @@
 //! OS secret vault (Windows Credential Manager via `keyring`).
 //!
-//! Joe Schmoe rule: passwords must survive restarts WITHOUT living in
-//! files. `ui.json` holds config; this vault holds the 8 secrets. Reads
+//! Passwords must survive restarts WITHOUT living in plain files.
+//! `ui.json` holds config; this vault holds the secrets. Reads
 //! fail soft (session-only mode + a note) when the vault is unavailable
-//! (headless CI, locked keychains) — never a crash, never a log line.
+//! (headless CI, locked keychains) -- never a crash, never a log line.
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 #![deny(clippy::unimplemented)]
 #![deny(clippy::todo)]
+#![allow(dead_code)]
 
 pub const SERVICE: &str = "rust-plex-mcp";
 
-/// Secret slots. Names are stable — renaming orphans stored credentials.
-/// Add a slot here only with a UI field that reads/writes it (YAGNI).
-pub const TAPO_PASSWORD: &str = "tapo-password";
-pub const CAMERA_PASSWORD: &str = "camera-password";
-pub const RING_PASSWORD: &str = "ring-password";
+/// Secret slots. Names are stable -- renaming orphans stored credentials.
+pub const PLEX_TOKEN: &str = "plex-token";
 pub const LLM_API_KEY: &str = "llm-api-key";
+pub const WEBHOOK_URL: &str = "webhook-url";
+pub const SPEECH_URL: &str = "speech-url";
 
 pub fn get(slot: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(SERVICE, slot).map_err(|e| format!("vault open: {e}"))?;

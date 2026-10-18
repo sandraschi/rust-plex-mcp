@@ -1,38 +1,39 @@
-//! Joe Schmoe device registry: adopted scan hits + manual entries.
+//! Custom Plex registry: user-pinned servers and media items.
 //!
-//! Fleet-imported devices live in the Python checkout (source of truth);
-//! THIS registry holds what the operator adopted or typed by hand. Stored
-//! as plain JSON next to `ui.json` (IPs and labels only — secrets stay in
-//! the OS vault, never here). Corrupt file → empty registry, never a crash.
+//! Stored as plain JSON next to `ui.json`. Corrupt file -> empty registry, never a crash.
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 #![deny(clippy::unimplemented)]
 #![deny(clippy::todo)]
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegDevice {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegServer {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegPinnedMedia {
     pub id: String,
+    pub title: String,
     pub kind: String,
-    pub vendor: String,
-    pub label: String,
-    pub ip: String,
-    pub port: Option<u16>,
-    pub username: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
-    pub devices: Vec<RegDevice>,
+    pub servers: Vec<RegServer>,
+    pub pinned: Vec<RegPinnedMedia>,
 }
 
 pub fn path() -> Option<std::path::PathBuf> {
     std::env::var("LOCALAPPDATA").ok().map(|base| {
         std::path::PathBuf::from(base)
             .join("rust-plex-mcp")
-            .join("devices.json")
+            .join("registry.json")
     })
 }
 
@@ -56,28 +57,23 @@ pub fn save(registry: &Registry) {
     }
 }
 
-pub fn adopt(ip: &str, port: u16, kind: &str, label: &str) -> RegDevice {
-    let (kind, vendor) = match kind {
-        "hue" => ("hue".to_string(), String::new()),
-        "shelly" => ("plug".to_string(), "shelly".to_string()),
-        "kasa?" => ("plug".to_string(), "kasa".to_string()),
-        "onvif?" => ("camera".to_string(), "onvif".to_string()),
-        "rtsp?" => ("camera".to_string(), "tapo".to_string()),
-        other => ("generic".to_string(), other.to_string()),
-    };
-    RegDevice {
-        id: format!("{kind}:{ip}:{port}"),
-        kind,
-        vendor,
-        label: if label.trim().is_empty() {
-            ip.to_string()
-        } else {
-            label.trim().to_string()
-        },
-        ip: ip.trim().to_string(),
-        port: Some(port),
-        username: String::new(),
+pub fn pin_server(name: &str, url: &str) -> Registry {
+    let mut reg = load();
+    if !reg.servers.iter().any(|s| s.url == url) {
+        reg.servers.push(RegServer {
+            name: name.to_string(),
+            url: url.to_string(),
+        });
+        save(&reg);
     }
+    reg
+}
+
+pub fn unpin_server(url: &str) -> Registry {
+    let mut reg = load();
+    reg.servers.retain(|s| s.url != url);
+    save(&reg);
+    reg
 }
 
 #[cfg(test)]
@@ -85,19 +81,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adopt_maps_kinds() {
-        let hue = adopt("192.168.0.5", 80, "hue", "Hall");
-        assert_eq!(hue.kind, "hue");
-        let kasa = adopt("192.168.0.6", 9999, "kasa?", "");
-        assert_eq!(kasa.vendor, "kasa");
-        assert_eq!(kasa.label, "192.168.0.6");
+    fn corrupt_file_is_empty_registry() {
+        let registry: Registry = serde_json::from_str("not json{{").unwrap_or_default();
+        assert!(registry.servers.is_empty());
+        assert!(registry.pinned.is_empty());
     }
 
     #[test]
-    fn corrupt_file_is_empty_registry() {
-        // save() to a bogus LOCALAPPDATA would touch the real machine —
-        // instead assert the deserializer's fallback directly.
-        let registry: Registry = serde_json::from_str("not json{{").unwrap_or_default();
-        assert!(registry.devices.is_empty());
+    fn registry_manipulations() {
+        let mut reg = Registry::default();
+        reg.servers.push(RegServer {
+            name: "TestServer".to_string(),
+            url: "http://127.0.0.1:32400".to_string(),
+        });
+        assert_eq!(reg.servers.len(), 1);
+        reg.servers.retain(|s| s.name != "TestServer");
+        assert!(reg.servers.is_empty());
     }
 }
