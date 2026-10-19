@@ -25,6 +25,8 @@ Prerequisites:
 - Rust 1.80+ (`cargo`, `rustc`)
 - Just command runner (`cargo install just`)
 - NSIS 3.0+ (optional, for building the installer)
+- `protoc` (required: LanceDB storage builds on it — `winget install --id Google.Protobuf`)
+- First `rag-sync` downloads the MiniLM embedding model once (~90 MB, minutes), then embeds on CPU
 
 ```powershell
 git clone https://github.com/sandraschi/rust-plex-mcp.git

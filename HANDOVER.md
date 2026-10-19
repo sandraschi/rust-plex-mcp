@@ -1,8 +1,16 @@
 # HANDOVER -- `rust-plex-mcp`
 
-**Last Updated:** 2026-10-18T17:06:00+02:00
-**Current Status:** Completed (v0.4.0 Released) -- All 5 Phases Complete
+**Last Updated:** 2026-10-19T00:30:00+02:00
+**Current Status:** v0.4.0 Released + post-release kernels (streaming LLM, LanceDB RAG, browser/richchat modules)
 **GitHub Release:** https://github.com/sandraschi/rust-plex-mcp/releases/tag/v0.4.0
+
+## Post-Release Kernels (2026-10-18/19)
+
+- **True LLM streaming**: `llm::chat_stream` (OpenAI-compat SSE + Anthropic SSE, Send callback, runaway cap); chat page consumes real tokens via generation-guarded `ChatChunk`/`ChatError` jobs; `chat --stream` CLI proven live against Ollama `gemma4:12b`.
+- **LanceDB RAG**: `rag.rs` (`Embedder` trait, `StubEmbedder`, `FastEmbedder` MiniLM, shared model cache, `RagIndex` rebuild/count/search, demo table separation); `RagSync`/`RagStatus` commands; live proof: 163 items dim 384, vector search hits, honest keyword fallback. Needs `protoc` at build time (`winget install --id Google.Protobuf`); first sync downloads MiniLM once.
+- **Fleet UI kernels**: `browser.rs` (search/sort/letter-jump/pagination, Movies+Search+Libraries wired) and `richchat.rs` (personas, skill preprompt, streaming reveal, export) extracted as verbatim-copy modules.
+- **Dead-UI fixes**: metadata inspector, semantic matches, and RAG telemetry now read live payload shapes; hardcoded mock KPIs deleted.
+- Upstream note: `lancedb 0.40.0` requires the `remote` feature to compile (default features broken upstream); pinned arrow 58 to match lancedb.
 
 ## What Was Done
 
