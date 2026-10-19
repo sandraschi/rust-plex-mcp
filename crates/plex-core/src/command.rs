@@ -10,9 +10,11 @@ use crate::plex::{
     demo_recently_added, demo_search, demo_section_items, demo_sections, demo_sessions, PlexClient,
     PlexConfig,
 };
+use crate::rag::Embedder;
 use serde_json::{json, Value};
 
-/// Comprehensive commands for all 36 MCP tools, CLI, and desktop UI pages.
+/// Comprehensive commands for all MCP tools (see L2 tool catalog for the
+/// live count), CLI, and desktop UI pages.
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Identity report: app, version, vendor, source. No network.
@@ -51,8 +53,20 @@ pub enum Command {
     TasteProfile,
     /// Metadata enrichment report for item.
     MediaEnrich { rating_key: String },
-    /// Semantic / RAG search over media synopsis.
-    RagSearch { query: String },
+    /// Semantic / RAG search over media synopsis (vector index when
+    /// synced, keyword fallback otherwise — `mode` names the path taken).
+    RagSearch {
+        query: String,
+        limit: Option<usize>,
+        data_dir: Option<String>,
+    },
+    /// Embed the whole library into the LanceDB index (full rebuild).
+    RagSync {
+        limit_per_section: Option<usize>,
+        data_dir: Option<String>,
+    },
+    /// Index status: row count, vector dim, model, location.
+    RagStatus { data_dir: Option<String> },
     /// Transcode, bandwidth, and server performance status.
     PerfStatus,
     /// Media repair and audio/subtitle integrity report.
@@ -256,13 +270,92 @@ async fn dispatch_demo(command: Command) -> Result<Value, DeviceError> {
             "subtitles_available": ["en", "de", "ja"],
             "has_trailer": true
         }),
-        Command::RagSearch { query } => json!({
-            "success": true, "vendor": "demo",
-            "query": query,
-            "semantic_results": [
-                { "rating_key": "101", "title": "Demo Feature Film", "relevance": 0.96 }
-            ]
-        }),
+        Command::RagSearch {
+            query,
+            limit,
+            data_dir,
+        } => {
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            let limit = limit.unwrap_or(10).clamp(1, 50);
+            match crate::rag::RagIndex::open_existing(&dir, crate::rag::TABLE_MEDIA_DEMO).await {
+                Ok(index) => {
+                    let mut stub = crate::rag::StubEmbedder::new(index.dim);
+                    let texts = vec![query.clone()];
+                    let vectors = stub.embed(&texts)?;
+                    let hits = index
+                        .search(vectors.into_iter().next().unwrap_or_default(), limit)
+                        .await?;
+                    json!({
+                        "success": true, "vendor": "demo", "mode": "vector",
+                        "query": query,
+                        "semantic_results": hits.iter().map(|hit| json!({
+                            "rating_key": hit.rating_key,
+                            "title": hit.title,
+                            "relevance": crate::rag::distance_to_relevance(hit.distance),
+                        })).collect::<Vec<_>>(),
+                    })
+                }
+                Err(_) => json!({
+                    "success": true, "vendor": "demo", "mode": "keyword_fallback",
+                    "query": query,
+                    "semantic_results": [
+                        { "rating_key": "101", "title": "Demo Feature Film", "relevance": 0.96 }
+                    ]
+                }),
+            }
+        }
+        Command::RagSync {
+            limit_per_section: _,
+            data_dir,
+        } => {
+            // Demo sync embeds the fixture library with deterministic stub
+            // vectors into the demo table (never the live index).
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            let mut rows = Vec::new();
+            for section in crate::plex::demo_sections()? {
+                let key = section.key.unwrap_or_default();
+                for item in crate::plex::demo_section_items(&key)? {
+                    let row = crate::rag::MediaRow::from_item(&item);
+                    if !row.rating_key.is_empty() && !row.title.is_empty() {
+                        rows.push(row);
+                    }
+                }
+            }
+            let mut stub = crate::rag::StubEmbedder::new(384);
+            let texts: Vec<String> = rows.iter().map(crate::rag::MediaRow::embed_text).collect();
+            let embeddings = stub.embed(&texts)?;
+            let index = crate::rag::RagIndex::rebuild(
+                &dir,
+                crate::rag::TABLE_MEDIA_DEMO,
+                &rows,
+                &embeddings,
+                384,
+            )
+            .await?;
+            json!({
+                "success": true, "vendor": "demo", "mode": "stub",
+                "items_synced": rows.len(),
+                "dim": index.dim,
+                "table": crate::rag::TABLE_MEDIA_DEMO,
+            })
+        }
+        Command::RagStatus { data_dir } => {
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            match crate::rag::RagIndex::open_existing(&dir, crate::rag::TABLE_MEDIA_DEMO).await {
+                Ok(index) => json!({
+                    "success": true, "vendor": "demo", "status": "synced",
+                    "rows": index.count().await?,
+                    "dim": index.dim,
+                    "table": crate::rag::TABLE_MEDIA_DEMO,
+                    "location": dir.to_string_lossy(),
+                }),
+                Err(e) => json!({
+                    "success": true, "vendor": "demo", "status": "not_synced",
+                    "hint": "run RagSync first",
+                    "detail": e.to_string(),
+                }),
+            }
+        }
         Command::PerfStatus => json!({
             "success": true, "vendor": "demo",
             "transcode_sessions": 0,
@@ -282,7 +375,7 @@ async fn dispatch_demo(command: Command) -> Result<Value, DeviceError> {
         }),
         Command::ToolsList => json!({
             "success": true, "vendor": "demo",
-            "tools_count": 36,
+            "tools_count": 28,
             "transport": "stdio-jsonrpc-2.0"
         }),
         Command::SkillsList => json!({
@@ -380,13 +473,124 @@ async fn dispatch_live(client: &PlexClient, command: Command) -> Result<Value, D
                 "enriched": true
             })
         }
-        Command::RagSearch { query } => {
-            let search_results = client.search(&query).await.unwrap_or_default();
+        Command::RagSearch {
+            query,
+            limit,
+            data_dir,
+        } => {
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            let limit = limit.unwrap_or(10).clamp(1, 50);
+            match crate::rag::RagIndex::open_existing(&dir, crate::rag::TABLE_MEDIA).await {
+                Ok(index) => {
+                    let text = query.clone();
+                    let vectors = tokio::task::spawn_blocking(move || {
+                        crate::rag::embed_shared(std::slice::from_ref(&text))
+                    })
+                    .await
+                    .map_err(|e| DeviceError::Protocol(format!("rag: embed task failed: {e}")))??;
+                    let hits = index
+                        .search(vectors.into_iter().next().unwrap_or_default(), limit)
+                        .await?;
+                    json!({
+                        "success": true, "vendor": "live", "mode": "vector",
+                        "query": query,
+                        "results": hits.iter().map(|hit| json!({
+                            "rating_key": hit.rating_key,
+                            "title": hit.title,
+                            "summary": hit.summary,
+                            "type": hit.kind,
+                            "year": hit.year,
+                            "relevance": crate::rag::distance_to_relevance(hit.distance),
+                        })).collect::<Vec<_>>(),
+                    })
+                }
+                Err(_) => {
+                    let search_results = client.search(&query).await.unwrap_or_default();
+                    json!({
+                        "success": true, "vendor": "live", "mode": "keyword_fallback",
+                        "query": query,
+                        "hint": "run RagSync for semantic search",
+                        "results": search_results
+                    })
+                }
+            }
+        }
+        Command::RagSync {
+            limit_per_section,
+            data_dir,
+        } => {
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            let per_section = limit_per_section.unwrap_or(500).clamp(1, 1000);
+            // Rows fetch on async workers; ONNX embedding on a blocking
+            // thread; LanceDB rebuild back on async. Model downloads on
+            // first run (honest minutes) and caches process-wide.
+            let mut rows = Vec::new();
+            for section in client.sections().await? {
+                let Some(key) = section.key.as_deref() else {
+                    continue;
+                };
+                for item in client.section_items(key, per_section, 0).await? {
+                    let row = crate::rag::MediaRow::from_item(&item);
+                    if row.rating_key.is_empty() || row.title.is_empty() {
+                        continue;
+                    }
+                    rows.push(row);
+                    if rows.len() >= crate::rag::MAX_SYNC_ITEMS {
+                        break;
+                    }
+                }
+                if rows.len() >= crate::rag::MAX_SYNC_ITEMS {
+                    break;
+                }
+            }
+            if rows.is_empty() {
+                return Err(DeviceError::NotFound(
+                    "rag: library yielded zero embeddable items".to_string(),
+                ));
+            }
+            let texts: Vec<String> = rows.iter().map(crate::rag::MediaRow::embed_text).collect();
+            let embeddings = tokio::task::spawn_blocking(move || crate::rag::embed_shared(&texts))
+                .await
+                .map_err(|e| DeviceError::Protocol(format!("rag: embed task failed: {e}")))??;
+            if embeddings.first().map(Vec::len).unwrap_or(0) == 0 {
+                return Err(DeviceError::Protocol(
+                    "rag: embedder returned empty vectors".to_string(),
+                ));
+            }
+            let dim = embeddings.first().map(Vec::len).unwrap_or(0);
+            let index = crate::rag::RagIndex::rebuild(
+                &dir,
+                crate::rag::TABLE_MEDIA,
+                &rows,
+                &embeddings,
+                dim,
+            )
+            .await?;
             json!({
-                "success": true, "vendor": "live",
-                "query": query,
-                "results": search_results
+                "success": true, "vendor": "live", "mode": crate::rag::MODEL_NAME,
+                "items_synced": rows.len(),
+                "dim": index.dim,
+                "table": crate::rag::TABLE_MEDIA,
+                "location": dir.to_string_lossy(),
             })
+        }
+        Command::RagStatus { data_dir } => {
+            let dir = crate::rag::index_dir(data_dir.as_deref());
+            match crate::rag::RagIndex::open_existing(&dir, crate::rag::TABLE_MEDIA).await {
+                Ok(index) => json!({
+                    "success": true, "vendor": "live", "status": "synced",
+                    "rows": index.count().await?,
+                    "dim": index.dim,
+                    "model": crate::rag::MODEL_NAME,
+                    "table": crate::rag::TABLE_MEDIA,
+                    "location": dir.to_string_lossy(),
+                }),
+                Err(e) => json!({
+                    "success": true, "vendor": "live", "status": "not_synced",
+                    "hint": "run RagSync first",
+                    "detail": e.to_string(),
+                }),
+            }
         }
         Command::PerfStatus => {
             let sessions = client.sessions().await.unwrap_or_default();
@@ -410,7 +614,7 @@ async fn dispatch_live(client: &PlexClient, command: Command) -> Result<Value, D
         }),
         Command::ToolsList => json!({
             "success": true, "vendor": "live",
-            "tools_count": 36,
+            "tools_count": 28,
             "transport": "stdio-jsonrpc-2.0"
         }),
         Command::SkillsList => json!({
@@ -476,6 +680,45 @@ mod tests {
         assert_eq!(playlists["playlists"].as_array().map(Vec::len), Some(2));
         let clients = dispatch(&config, Command::ClientsList).await?;
         assert_eq!(clients["clients"].as_array().map(Vec::len), Some(1));
+        // Demo RAG loop on an isolated temp dir: sync → status → vector
+        // search. Stub vectors keep this offline and deterministic.
+        let sync_dir =
+            std::env::temp_dir().join(format!("rust-plex-rag-demo-{}", std::process::id()));
+        let sync_dir_str = sync_dir.to_string_lossy().into_owned();
+        let synced = dispatch(
+            &config,
+            Command::RagSync {
+                limit_per_section: None,
+                data_dir: Some(sync_dir_str.clone()),
+            },
+        )
+        .await?;
+        let synced_count = synced["items_synced"].as_u64().unwrap_or(0);
+        assert!(synced_count > 0);
+        let status = dispatch(
+            &config,
+            Command::RagStatus {
+                data_dir: Some(sync_dir_str.clone()),
+            },
+        )
+        .await?;
+        assert_eq!(status["status"], "synced");
+        assert_eq!(status["rows"].as_u64(), Some(synced_count));
+        let searched = dispatch(
+            &config,
+            Command::RagSearch {
+                query: "demo".to_string(),
+                limit: Some(5),
+                data_dir: Some(sync_dir_str),
+            },
+        )
+        .await?;
+        assert_eq!(searched["mode"], "vector");
+        assert!(searched["semantic_results"]
+            .as_array()
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false));
+        let _ = std::fs::remove_dir_all(&sync_dir);
         Ok(())
     }
 

@@ -19,6 +19,7 @@ pub mod error;
 pub mod import;
 pub mod llm;
 pub mod plex;
+pub mod rag;
 
 pub use command::{dispatch, dispatch_auto, Command};
 pub use error::DeviceError;

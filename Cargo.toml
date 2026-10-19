@@ -17,13 +17,11 @@ todo = "deny"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 reqwest = { version = "0.12", features = ["json"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v5"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
 keyring = "4"
 eframe = "0.37"
-egui_kittest = "0.37"
 image = "0.25"
 open = "5"

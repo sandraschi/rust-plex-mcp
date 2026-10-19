@@ -18,6 +18,9 @@ pub enum DeviceError {
     Auth(String),
     /// Reachable device this driver cannot speak to (wrong generation, model).
     Unsupported(String),
+    /// Expected local state is absent (unsynced RAG table, missing cache).
+    /// Recover by building it (sync), never by crashing.
+    NotFound(String),
 }
 
 impl fmt::Display for DeviceError {
@@ -29,6 +32,7 @@ impl fmt::Display for DeviceError {
             DeviceError::InvalidInput(ctx) => write!(f, "invalid input: {ctx}"),
             DeviceError::Auth(ctx) => write!(f, "auth failed: {ctx}"),
             DeviceError::Unsupported(ctx) => write!(f, "unsupported: {ctx}"),
+            DeviceError::NotFound(ctx) => write!(f, "not found: {ctx}"),
         }
     }
 }

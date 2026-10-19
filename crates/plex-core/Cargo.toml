@@ -12,6 +12,11 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+fastembed = "7.1.1"
+arrow-array = "58"
+arrow-schema = "58"
+futures = "0.3"
+lancedb = { version = "0.40", features = ["remote"] }
 
 [lints]
 workspace = true
