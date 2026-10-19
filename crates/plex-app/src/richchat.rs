@@ -58,6 +58,9 @@ pub enum ChatIntent {
     Send { prompt: String, system: String },
     /// History was cleared (app may note it in the status line).
     Cleared,
+    /// User stopped the pending reply. App must retire the generation so
+    /// late chunks from the killed turn never append.
+    Stopped,
     /// Transcript markdown was copied to the OS clipboard.
     Exported,
 }
@@ -199,6 +202,7 @@ impl RichChat {
             }
             if self.is_streaming() && ui.button("Stop").clicked() {
                 self.cancel_stream();
+                intent = ChatIntent::Stopped;
             }
         });
 

@@ -58,6 +58,10 @@ struct Cli {
     #[arg(long, global = true)]
     token: Option<String>,
 
+    /// RAG index directory (else PLEX_MCP_DATA env / OS default)
+    #[arg(long, global = true)]
+    data_dir: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -107,6 +111,31 @@ enum Commands {
     },
     /// Taste and recommendation profile
     Taste,
+    /// Chat with the LLM (buffered JSON, or --stream for live tokens)
+    Chat {
+        prompt: String,
+        #[arg(long)]
+        system: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        stream: bool,
+    },
+    /// Semantic search over the library (vector index when synced)
+    RagSearch {
+        query: String,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Embed the whole library into the local LanceDB index
+    RagSync {
+        #[arg(long)]
+        limit_per_section: Option<usize>,
+    },
+    /// RAG index status (rows, dim, model, location)
+    RagStatus,
     /// Server transcode and bandwidth status
     Perf,
     /// Run MCP 2024-11-05 JSON-RPC stdio server loop
@@ -165,7 +194,63 @@ async fn main() {
                     confirm,
                 },
                 Commands::Canon { library } => Command::CanonCoverage { library },
+                Commands::RagSearch { query, limit } => Command::RagSearch {
+                    query,
+                    limit,
+                    data_dir: cli.data_dir.clone(),
+                },
+                Commands::RagSync { limit_per_section } => Command::RagSync {
+                    limit_per_section,
+                    data_dir: cli.data_dir.clone(),
+                },
+                Commands::RagStatus => Command::RagStatus {
+                    data_dir: cli.data_dir.clone(),
+                },
                 Commands::Taste => Command::TasteProfile,
+                Commands::Chat {
+                    prompt,
+                    system,
+                    provider,
+                    model,
+                    stream,
+                } => {
+                    if stream {
+                        use plex_core::llm::{ChatMessage, chat_stream};
+                        let mut messages = Vec::new();
+                        if let Some(sys) = system {
+                            messages.push(ChatMessage::system(sys));
+                        }
+                        messages.push(ChatMessage::user(prompt));
+                        let mut out = std::io::stdout();
+                        let mut sink = |token: &str| {
+                            let _ = out.write_all(token.as_bytes());
+                            let _ = out.flush();
+                        };
+                        match chat_stream(
+                            provider, None, model, None, messages, 256 * 1024, &mut sink,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                println!();
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!("rust-plex-mcp chat error: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Command::LlmChat {
+                        provider: provider.unwrap_or_default(),
+                        model,
+                        prompt,
+                        system,
+                        context: None,
+                        base_url: None,
+                        api_key: None,
+                    }
+                }
                 Commands::Perf => Command::PerfStatus,
                 Commands::McpStdio => unreachable!(),
             };
@@ -264,8 +349,18 @@ const TOOL_CATALOG: &[(&str, &str, &str)] = &[
     ),
     (
         "plex.rag_search",
-        "Semantic AI search over media synopses and metadata.",
-        r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#,
+        "Semantic AI search over media synopses and metadata (vector index when synced, keyword fallback otherwise).",
+        r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"},"data_dir":{"type":"string"}},"required":["query"]}"#,
+    ),
+    (
+        "plex.rag_sync",
+        "Embed the whole library into the local LanceDB index (full rebuild, CPU minutes on first run).",
+        r#"{"type":"object","properties":{"limit_per_section":{"type":"integer"},"data_dir":{"type":"string"}}}"#,
+    ),
+    (
+        "plex.rag_status",
+        "RAG index status: row count, vector dim, model, location.",
+        r#"{"type":"object","properties":{"data_dir":{"type":"string"}}}"#,
     ),
     (
         "plex.perf_status",
@@ -441,12 +536,56 @@ async fn call_tool(config: &PlexConfig, name: &str, args: Value) -> Result<Value
             Command::MediaEnrich { rating_key: rk }
         }
         "plex.rag_search" | "plex_rag_search" | "plex_rag" => {
-            let q = args
-                .get("query")
+            // Legacy portmanteau routed by operation: sync_metadata /
+            // sync_subtitles -> RagSync, status -> RagStatus, else search.
+            let data_dir = args
+                .get("data_dir")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Command::RagSearch { query: q }
+                .map(String::from);
+            match op {
+                "sync_metadata" | "sync_subtitles" => Command::RagSync {
+                    limit_per_section: None,
+                    data_dir,
+                },
+                "status" => Command::RagStatus { data_dir },
+                _ => {
+                    let q = args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let limit = args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .map(|n| n as usize);
+                    Command::RagSearch {
+                        query: q,
+                        limit,
+                        data_dir,
+                    }
+                }
+            }
+        }
+        "plex.rag_sync" | "plex_rag_sync" => {
+            let per_section = args
+                .get("limit_per_section")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let data_dir = args
+                .get("data_dir")
+                .and_then(Value::as_str)
+                .map(String::from);
+            Command::RagSync {
+                limit_per_section: per_section,
+                data_dir,
+            }
+        }
+        "plex.rag_status" | "plex_rag_status" => {
+            let data_dir = args
+                .get("data_dir")
+                .and_then(Value::as_str)
+                .map(String::from);
+            Command::RagStatus { data_dir }
         }
         "plex.perf_status" | "plex_perf_status" | "plex_performance" => Command::PerfStatus,
         "bridge.speak" | "bridge_speak" => {

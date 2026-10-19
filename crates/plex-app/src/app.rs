@@ -13,6 +13,7 @@ use crate::richchat::{ChatIntent, ChatPersona, RichChat};
 use eframe::egui::{
     self, Color32, CornerRadius, Margin, Pos2, Rect, RichText, Stroke, StrokeKind, Vec2,
 };
+use plex_core::llm::ChatMessage;
 use plex_core::{dispatch, dispatch_auto, fetch_image_bytes, Command, PlexConfig, Vendor};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -174,7 +175,14 @@ enum Job {
     InboxItems(Value),
     ToolsList(Value),
     SkillsList(Value),
-    ChatReply(Value),
+    ChatChunk {
+        gen: u64,
+        text: String,
+    },
+    ChatError {
+        gen: u64,
+        error: String,
+    },
     LlmModelsLoaded(Value),
     LlmTestResult(Value),
     StatusNote(String, Value),
@@ -259,6 +267,9 @@ pub struct PlexApp {
     chat_provider: String,
     chat_model: String,
     rich: RichChat,
+    /// Streaming generation: bumped per Send and per Stop so late chunks
+    /// from a dead turn never append to the live transcript.
+    chat_gen: u64,
 
     // Crossconnect state
     speak_text: String,
@@ -746,6 +757,7 @@ impl PlexApp {
                 plex_personas(),
                 plex_examples(),
             ),
+            chat_gen: 0,
 
             speak_text: "Plex server online. Media library indexed.".to_string(),
             speech_url: "http://127.0.0.1:10909".to_string(),
@@ -1073,11 +1085,16 @@ impl PlexApp {
                 Job::SkillsList(v) => {
                     self.skills_val = v;
                 }
-                Job::ChatReply(v) => {
-                    let reply = v.get("reply").and_then(Value::as_str).unwrap_or("No reply");
-                    self.rich.push_chunk(reply);
-                    self.last_raw = v;
-                    self.status_line = "Chat reply received".to_string();
+                Job::ChatChunk { gen, text } => {
+                    if gen == self.chat_gen {
+                        self.rich.push_chunk(&text);
+                    }
+                }
+                Job::ChatError { gen, error } => {
+                    if gen == self.chat_gen {
+                        self.rich.cancel_stream();
+                        self.status_line = format!("Chat failed: {error}");
+                    }
                 }
                 Job::LlmModelsLoaded(v) => {
                     if let Some(arr) = v.get("models").and_then(Value::as_array) {
@@ -2441,8 +2458,18 @@ impl PlexApp {
                 let tx = self.tx.clone();
                 let config = self.get_plex_config();
                 let q = self.semantic_query.clone();
+                let top_k = self.semantic_top_k;
                 self.spawn(async move {
-                    if let Ok(v) = dispatch(&config, Command::RagSearch { query: q }).await {
+                    if let Ok(v) = dispatch(
+                        &config,
+                        Command::RagSearch {
+                            query: q,
+                            limit: Some(top_k),
+                            data_dir: None,
+                        },
+                    )
+                    .await
+                    {
                         let _ = tx.send(Job::SemanticResults(v));
                     }
                 });
@@ -2451,13 +2478,27 @@ impl PlexApp {
 
         ui.add_space(12.0);
 
+        // Live dispatch returns `results[]` (relevance/summary), demo
+        // returns `semantic_results[]` - read both, plus the mode flag.
         let matches = self
             .semantic_results_val
-            .get("matches")
+            .get("results")
+            .or_else(|| self.semantic_results_val.get("semantic_results"))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let mode = self
+            .semantic_results_val
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("keyword_fallback");
         card(ui, "Semantic Similarity Matches", |ui| {
+            ui.label(
+                RichText::new(format!("Search mode: {mode}"))
+                    .size(11.0)
+                    .color(faint(ui)),
+            );
+            ui.add_space(4.0);
             if matches.is_empty() {
                 ui.label(
                     RichText::new(
@@ -2468,11 +2509,19 @@ impl PlexApp {
             } else {
                 for m in &matches {
                     let title = m.get("title").and_then(Value::as_str).unwrap_or("Title");
-                    let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                    let synopsis = m.get("synopsis").and_then(Value::as_str).unwrap_or("");
+                    let score = m
+                        .get("relevance")
+                        .or_else(|| m.get("score"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    let synopsis = m
+                        .get("summary")
+                        .or_else(|| m.get("synopsis"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(title).strong().color(ink(ui)));
-                        ui.label(RichText::new(format!("Similarity: {:.2}", score)).color(EMERALD));
+                        ui.label(RichText::new(format!("Similarity: {score:.2}")).color(EMERALD));
                     });
                     if !synopsis.is_empty() {
                         ui.label(RichText::new(synopsis).color(sub(ui)));
@@ -2495,29 +2544,73 @@ impl PlexApp {
         );
         ui.add_space(12.0);
 
+        // Live payloads only - no hardcoded numbers. RagStatus reports
+        // rows/dim/model/location; RagSync reports items_synced/dim.
+        let status = self
+            .rag_status_val
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let rows = self
+            .rag_status_val
+            .get("rows")
+            .or_else(|| self.rag_status_val.get("items_synced"))
+            .and_then(Value::as_u64)
+            .map(|n| format!("{n}"))
+            .unwrap_or_else(|| "-".to_string());
+        let dim = self
+            .rag_status_val
+            .get("dim")
+            .and_then(Value::as_u64)
+            .map(|n| format!("{n}"))
+            .unwrap_or_else(|| "-".to_string());
+        let model = self
+            .rag_status_val
+            .get("model")
+            .or_else(|| self.rag_status_val.get("mode"))
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string();
+        let location = self
+            .rag_status_val
+            .get("location")
+            .and_then(Value::as_str)
+            .unwrap_or("not synced yet")
+            .to_string();
+
         card(ui, "Vector Index Telemetry", |ui| {
             ui.horizontal(|ui| {
-                kpi_card(ui, "Indexed Documents", "1,248", "Synopses in index", SKY);
-                kpi_card(ui, "Dimensions", "768", "Vector embeddings", AMBER);
-                kpi_card(
-                    ui,
-                    "Index Health",
-                    "Optimal",
-                    "Cosine similarity depot",
-                    EMERALD,
-                );
+                kpi_card(ui, "Indexed Documents", &rows, "Synopses in index", SKY);
+                kpi_card(ui, "Dimensions", &dim, "Vector embeddings", AMBER);
+                kpi_card(ui, "Index Health", &status, &model, EMERALD);
             });
+
+            ui.add_space(6.0);
+            ui.label(RichText::new(location).size(11.0).color(faint(ui)));
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
+                if ui.button("Refresh Status").clicked() {
+                    let tx = self.tx.clone();
+                    let config = self.get_plex_config();
+                    self.spawn(async move {
+                        if let Ok(v) =
+                            dispatch(&config, Command::RagStatus { data_dir: None }).await
+                        {
+                            let _ = tx.send(Job::RagStatus(v));
+                        }
+                    });
+                }
                 if ui.button("Re-index Media Vector Depot").clicked() {
                     let tx = self.tx.clone();
                     let config = self.get_plex_config();
                     self.spawn(async move {
                         if let Ok(v) = dispatch(
                             &config,
-                            Command::RagSearch {
-                                query: "index-status".to_string(),
+                            Command::RagSync {
+                                limit_per_section: None,
+                                data_dir: None,
                             },
                         )
                         .await
@@ -2527,6 +2620,13 @@ impl PlexApp {
                     });
                 }
             });
+            ui.label(
+                RichText::new(
+                    "First sync downloads the MiniLM model once (minutes), then embeds on CPU.",
+                )
+                .size(11.0)
+                .color(faint(ui)),
+            );
         });
     }
 
@@ -2808,10 +2908,19 @@ impl PlexApp {
         let intent = self.rich.show(ui);
         match intent {
             ChatIntent::Idle => {}
-            ChatIntent::Cleared | ChatIntent::Exported => {
+            ChatIntent::Cleared => {
+                self.status_line = "Chat history cleared.".to_string();
+            }
+            ChatIntent::Exported => {
                 self.status_line = "Chat transcript exported to clipboard.".to_string();
             }
+            ChatIntent::Stopped => {
+                self.chat_gen += 1;
+                self.status_line = "Reply stopped.".to_string();
+            }
             ChatIntent::Send { prompt, system } => {
+                self.chat_gen += 1;
+                let gen = self.chat_gen;
                 let tx = self.tx.clone();
                 let provider = self.chat_provider.clone();
                 let model = Some(self.chat_model.clone());
@@ -2826,19 +2935,33 @@ impl PlexApp {
                     Some(self.llm_api_key.clone())
                 };
 
+                // True token streaming: every server-sent fragment lands
+                // as a ChatChunk this generation; a newer Send/Stop retires
+                // the turn and late chunks are dropped by generation.
                 self.spawn(async move {
-                    if let Ok(v) = dispatch_auto(Command::LlmChat {
-                        provider,
-                        model,
-                        prompt,
-                        system: Some(system),
-                        context: None,
+                    let messages = vec![ChatMessage::system(system), ChatMessage::user(prompt)];
+                    let tx_tokens = tx.clone();
+                    let mut sender = move |token: &str| {
+                        let _ = tx_tokens.send(Job::ChatChunk {
+                            gen,
+                            text: token.to_string(),
+                        });
+                    };
+                    if let Err(e) = plex_core::llm::chat_stream(
+                        Some(provider),
                         base_url,
+                        model,
                         api_key,
-                    })
+                        messages,
+                        256 * 1024,
+                        &mut sender,
+                    )
                     .await
                     {
-                        let _ = tx.send(Job::ChatReply(v));
+                        let _ = tx.send(Job::ChatError {
+                            gen,
+                            error: e.to_string(),
+                        });
                     }
                 });
             }
@@ -2850,8 +2973,7 @@ impl PlexApp {
         ui.heading(RichText::new("MCP Tools Catalog").color(ink(ui)).size(22.0));
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Execute any of the 36 registered FastMCP server tools in-process.")
-                .color(sub(ui)),
+            RichText::new("Execute any registered FastMCP server tool in-process.").color(sub(ui)),
         );
         ui.add_space(12.0);
 
